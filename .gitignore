@@ -44,6 +44,7 @@ desktop.ini
 # GCP / secrets
 *.json
 !package.json
+!package-lock.json
 !tsconfig.json
 service-account-*.json
 gcp-credentials.json
