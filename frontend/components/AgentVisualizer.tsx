@@ -1,12 +1,20 @@
 "use client";
 
+import { useMemo } from "react";
 import { useLiveAgent } from "@/app/hooks/useLiveAgent";
 import { useAudioVisualizer } from "@/app/hooks/useAudioVisualizer";
 import { motion } from "framer-motion";
 
 export function AgentVisualizer() {
   const { agentState } = useLiveAgent();
-  const audioData = useAudioVisualizer();
+  const rawAudioData = useAudioVisualizer();
+
+  const audioData = useMemo(() => {
+    if (agentState === "speaking" || agentState === "listening") {
+      return rawAudioData;
+    }
+    return new Uint8Array(0);
+  }, [agentState, rawAudioData]);
 
   const averageVolume = audioData.length > 0
     ? audioData.reduce((acc: number, val: number) => acc + val, 0) / audioData.length

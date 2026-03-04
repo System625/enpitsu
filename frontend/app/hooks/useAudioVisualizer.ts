@@ -10,7 +10,6 @@ export function useAudioVisualizer() {
 
   useEffect(() => {
     if (agentState !== "speaking" && agentState !== "listening") {
-      setAudioData(new Uint8Array(0));
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       return;
     }
