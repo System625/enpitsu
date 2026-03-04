@@ -1,26 +1,188 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-skeuo-base: #eee5f9;
+  --color-skeuo-highlight: #f8f4fc;
+  --color-skeuo-shadow: #c4b0dc;
+  --color-skeuo-deep-shadow: #a78dc4;
+  --color-skeuo-primary: #7c3aed;
+  --color-skeuo-primary-light: #a78bfa;
+  --color-skeuo-primary-dark: #5b21b6;
+  --color-skeuo-primary-shadow: #6d28d9;
+  --color-skeuo-surface: #f3eef8;
+  --color-skeuo-surface-raised: #f8f5fc;
+  --color-skeuo-sidebar: rgba(238, 229, 249, 0.85);
+  --color-skeuo-canvas: #f5f0fa;
+  --color-skeuo-text: #2e1065;
+  --color-skeuo-text-muted: #6b5a85;
+  --color-skeuo-border: rgba(124, 58, 237, 0.12);
+  --color-skeuo-glow: rgba(124, 58, 237, 0.25);
+  --font-display: "Anybody", "Avenir Next", system-ui, sans-serif;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
+:root {
+  --background: #f0eaf7;
+  --foreground: #2e1065;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #1a0e2e;
+    --foreground: #e8dff5;
+  }
+  @theme inline {
+    --color-skeuo-base: #1e1235;
+    --color-skeuo-highlight: #2a1d42;
+    --color-skeuo-shadow: #0e0820;
+    --color-skeuo-deep-shadow: #08041a;
+    --color-skeuo-surface: #1e1235;
+    --color-skeuo-surface-raised: #261a3d;
+    --color-skeuo-sidebar: rgba(30, 18, 53, 0.92);
+    --color-skeuo-canvas: #150d28;
+    --color-skeuo-text: #e8dff5;
+    --color-skeuo-text-muted: #a08cc0;
+    --color-skeuo-border: rgba(124, 58, 237, 0.2);
+    --color-skeuo-glow: rgba(139, 92, 246, 0.35);
   }
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Skeuomorphic shadow system ── */
+@utility shadow-neo {
+  box-shadow:
+    5px 5px 10px var(--color-skeuo-shadow),
+    -5px -5px 10px var(--color-skeuo-highlight),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+@utility shadow-neo-lg {
+  box-shadow:
+    8px 8px 16px var(--color-skeuo-shadow),
+    -8px -8px 16px var(--color-skeuo-highlight),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+@utility shadow-neo-pressed {
+  box-shadow:
+    inset 4px 4px 8px var(--color-skeuo-shadow),
+    inset -4px -4px 8px var(--color-skeuo-highlight);
+}
+
+@utility shadow-inner-soft {
+  box-shadow:
+    inset 2px 2px 5px var(--color-skeuo-shadow),
+    inset -2px -2px 5px var(--color-skeuo-highlight);
+}
+
+@utility shadow-neo-btn {
+  box-shadow:
+    3px 3px 6px var(--color-skeuo-shadow),
+    -3px -3px 6px var(--color-skeuo-highlight),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.05);
+}
+
+@utility shadow-neo-btn-pressed {
+  box-shadow:
+    inset 3px 3px 6px var(--color-skeuo-shadow),
+    inset -3px -3px 6px var(--color-skeuo-highlight);
+}
+
+@utility shadow-purple-glow {
+  box-shadow:
+    0 0 20px var(--color-skeuo-glow),
+    0 0 40px rgba(124, 58, 237, 0.1);
+}
+
+/* ── Texture overlays ── */
+@utility bg-noise {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.04'/%3E%3C/svg%3E");
+}
+
+@utility bg-paper {
+  background-image:
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+}
+
+@utility bg-glass {
+  background: rgba(248, 244, 252, 0.6);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+}
+
+@utility bg-glass-dark {
+  background: rgba(30, 18, 53, 0.7);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+}
+
+/* ── Comic speech bubble ── */
+.comic-bubble {
+  border-radius: 20px 20px 20px 6px;
+  position: relative;
+  filter: drop-shadow(2px 3px 0px rgba(46, 16, 101, 0.2));
+}
+
+.comic-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -12px;
+  left: 18px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 14px 12px 0 0;
+  border-color: white transparent transparent transparent;
+  filter: drop-shadow(0px 2px 0px rgba(46, 16, 101, 0.1));
+}
+
+.comic-bubble::before {
+  content: "";
+  position: absolute;
+  bottom: -15px;
+  left: 16px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 17px 15px 0 0;
+  border-color: #1a1a2e transparent transparent transparent;
+  z-index: -1;
+}
+
+/* ── Scrollbar styling ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-skeuo-shadow);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-skeuo-primary-light);
+}
+
+/* ── Purple pulse animation ── */
+@keyframes purple-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.4); }
+  50% { box-shadow: 0 0 0 12px rgba(124, 58, 237, 0); }
+}
+
+@utility animate-purple-pulse {
+  animation: purple-pulse 2s ease-in-out infinite;
 }
