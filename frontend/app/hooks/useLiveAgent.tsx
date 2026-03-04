@@ -197,8 +197,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      const AudioContext = window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      audioContextRef.current = new AudioContext();
+      const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext) as typeof window.AudioContext;
+      audioContextRef.current = new AudioContextClass();
     }
     return () => { audioContextRef.current?.close(); };
   }, []);

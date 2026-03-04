@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Image } from "next/image";
+import Image from "next/image";
 import { ComicPanel as ComicPanelType } from "@/app/hooks/useLiveAgent";
 
 interface ComicPanelProps {
