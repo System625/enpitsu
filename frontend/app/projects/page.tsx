@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Project, loadProjects } from "@/app/hooks/useProjects";
@@ -8,11 +8,7 @@ import { ProjectCard } from "@/components/ProjectCard";
 
 export default function ProjectsPage() {
   const router = useRouter();
-  const [projects, setProjects] = useState<Project[]>([]);
-
-  useEffect(() => {
-    setProjects(loadProjects());
-  }, []);
+  const [projects, setProjects] = useState<Project[]>(loadProjects());
 
   const handleOpen = (id: string) => {
     router.push(`/?project=${id}`);

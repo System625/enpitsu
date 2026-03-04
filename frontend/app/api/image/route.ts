@@ -9,7 +9,6 @@ export async function GET(request: NextRequest) {
   const width = searchParams.get("width") ?? "1024";
   const height = searchParams.get("height") ?? "1024";
   const negativePrompt = searchParams.get("negative_prompt") ?? "";
-  const enhance = searchParams.get("enhance") ?? "false";
 
   if (!prompt) {
     return NextResponse.json({ error: "prompt is required" }, { status: 400 });
