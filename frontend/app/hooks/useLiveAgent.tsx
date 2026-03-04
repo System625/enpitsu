@@ -197,7 +197,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContext = window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioContextRef.current = new AudioContext();
     }
     return () => { audioContextRef.current?.close(); };
@@ -205,7 +205,11 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     console.log("WebSocket would connect here");
-    return () => { wsRef.current?.close(); };
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      const ws = wsRef.current;
+      ws?.close();
+    };
   }, []);
 
   // Auto-save on every panels change (debounced)

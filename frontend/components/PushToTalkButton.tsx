@@ -7,6 +7,7 @@ import { motion } from "framer-motion";
 
 export function PushToTalkButton() {
   const { isRecording, startRecording, stopRecording, agentState, interruptAgent } = useLiveAgent();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const transcriptRef = useRef<string>("");
   const [liveText, setLiveText] = useState("");
@@ -25,7 +26,7 @@ export function PushToTalkButton() {
 
     const SR =
       typeof window !== "undefined" &&
-      ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+      ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition); // eslint-disable-line @typescript-eslint/no-explicit-any
 
     if (!SR) {
       return;
@@ -36,6 +37,7 @@ export function PushToTalkButton() {
     recognition.interimResults = true;
     recognition.continuous = true;
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onresult = (e: any) => {
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
