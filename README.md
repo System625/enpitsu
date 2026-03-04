@@ -10,9 +10,9 @@ Built for [Devpost Hackathon](https://devpost.com).
 
 | Role | Name |
 |------|------|
-| Frontend | @your-handle |
-| Backend | @friend1-handle |
-| Infrastructure | @friend2-handle |
+| Frontend | @system625 |
+| Backend | @akintewe |
+| Infrastructure | @dominionola |
 
 ---
 
