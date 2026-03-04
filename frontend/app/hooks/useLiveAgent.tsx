@@ -197,6 +197,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext) as typeof window.AudioContext;
       audioContextRef.current = new AudioContextClass();
     }
