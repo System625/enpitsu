@@ -335,7 +335,7 @@ export function buildScenePrompt(
   const parts: string[] = [];
 
   // ── COMPOSITION — describe the scene as a camera would see it ──
-  parts.push("wide establishing shot of a scene showing the full environment");
+  parts.push("extreme wide shot, full scene, establishing shot, camera pulled far back, entire environment visible, no faces filling frame");
   parts.push(`setting: ${scene.setting}`);
 
   // ── ACTION / MOOD — what is happening in this scene ──
@@ -402,7 +402,7 @@ export function buildNegativePrompt(
   const parts: string[] = [];
 
   // ── ANTI-PORTRAIT — this is the most important part ──
-  parts.push("close-up, closeup, portrait, headshot, face only, bust shot, shoulders up, cropped, macro, head and shoulders, selfie, mugshot");
+  parts.push("close-up, closeup, extreme close-up, portrait, headshot, face only, face filling frame, bust shot, chest up, shoulders up, cropped, macro, head and shoulders, selfie, mugshot, zoomed in face, talking head");
 
   const sceneChars = characters.filter(c => scene.characters.includes(c.name));
 

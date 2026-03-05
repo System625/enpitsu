@@ -14,6 +14,28 @@ import {
 
 export type ComicStyle = "american" | "manga" | "franco_belgian" | "manhwa" | "manhua";
 
+async function fetchAiCaption(scene: StoryScene, style: ComicStyle): Promise<string | null> {
+  try {
+    const res = await fetch("/api/caption", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        narrative: scene.narrative,
+        action: scene.action,
+        mood: scene.mood,
+        characters: scene.characters,
+        dialogue: scene.dialogue,
+        style,
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.caption ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
 export interface ComicPanel {
@@ -69,7 +91,7 @@ function buildCharacterPrompt(text: string, style: ComicStyle): PromptResult {
   const isFemale = /\b(female|woman|girl|she|her|lady|ladies|women)\b/.test(lower);
   const isMale   = /\b(male|man|boy|he|his|guy|dude|men)\b/.test(lower);
 
-  const antiPortrait = "close-up, closeup, portrait, headshot, face only, bust shot, shoulders up, cropped, macro, selfie, mugshot";
+  const antiPortrait = "close-up, closeup, extreme close-up, portrait, headshot, face only, face filling frame, bust shot, chest up, shoulders up, cropped, macro, selfie, mugshot, zoomed in face, talking head";
 
   if (isFemale) {
     genderDesc = "a woman";
@@ -100,7 +122,7 @@ function buildCharacterPrompt(text: string, style: ComicStyle): PromptResult {
   if (eyeMatch) roleParts.push(`and ${eyeMatch[0]}`);
 
   const prompt = [
-    `wide shot of ${genderDesc} standing full body from head to feet in a detailed environment`,
+    `extreme wide shot, full body from head to feet, entire figure visible, ${genderDesc} standing in a detailed environment, camera pulled far back`,
     roleParts.join(", "),
     styleModifiers[style],
     "comic book panel, detailed background, dynamic composition, high quality illustration",
@@ -269,9 +291,20 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
       // Generate all remaining scenes
       const baseId = Date.now();
+      let insertedPanels: ComicPanel[] = [];
       setPanels(prev => {
-        const newPanels = scenesToPanels(remaining, story, currentStyle, prev.length, baseId);
-        return [...prev, ...newPanels];
+        insertedPanels = scenesToPanels(remaining, story, currentStyle, prev.length, baseId);
+        return [...prev, ...insertedPanels];
+      });
+
+      // Enrich captions with AI in the background
+      remaining.forEach((scene, i) => {
+        fetchAiCaption(scene, currentStyle).then(caption => {
+          if (!caption) return;
+          const panelId = insertedPanels[i]?.id;
+          if (!panelId) return;
+          setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
+        });
       });
 
       storyProgressRef.current = story.scenes.length; // mark all as generated
@@ -322,12 +355,30 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         placeholders.push({
           id: `panel_${baseId}_${i}`,
           imageUrl: `/api/image?${new URLSearchParams(params)}`,
-          text: text.trim() || "Here you go!",
+          text: "...",
           index: startIdx + i,
         });
       }
       return [...prev, ...placeholders];
     });
+
+    // Fetch AI captions for character panels
+    const fakeScene: StoryScene = {
+      pageNumber: 0,
+      narrative: text,
+      setting: "dynamic environment",
+      characters: [],
+      action: text,
+      dialogue: [],
+      mood: "dramatic",
+    };
+    for (let i = 0; i < panelCount; i++) {
+      const panelId = `panel_${baseId}_${i}`;
+      fetchAiCaption(fakeScene, currentStyle).then(caption => {
+        if (!caption) return;
+        setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
+      });
+    }
 
     setAgentState("speaking");
     const dialogueText = panelCount > 1 ? `Generating ${panelCount} panels!` : "Got it!";
@@ -362,9 +413,20 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       setStoryLoaded(true);
 
       const baseId = Date.now();
+      let insertedPanels: ComicPanel[] = [];
       setPanels(prev => {
-        const newPanels = scenesToPanels(previewScenes, parsed, currentStyle, prev.length, baseId);
-        return [...prev, ...newPanels];
+        insertedPanels = scenesToPanels(previewScenes, parsed, currentStyle, prev.length, baseId);
+        return [...prev, ...insertedPanels];
+      });
+
+      // Enrich captions with AI in the background
+      previewScenes.forEach((scene, i) => {
+        fetchAiCaption(scene, currentStyle).then(caption => {
+          if (!caption) return;
+          const panelId = insertedPanels[i]?.id;
+          if (!panelId) return;
+          setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
+        });
       });
 
       // 4. Announce what we found
