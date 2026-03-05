@@ -14,7 +14,7 @@ export function ProjectLoader() {
     if (id) {
       loadProjectById(id);
     }
-  // Only run once on mount
+  // Run once on mount
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
