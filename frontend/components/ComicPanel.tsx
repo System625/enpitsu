@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import Image from "next/image";
 import { ComicPanel as ComicPanelType } from "@/app/hooks/useLiveAgent";
 
 interface ComicPanelProps {
@@ -57,14 +56,14 @@ export function ComicPanel({ panel }: ComicPanelProps) {
 
       { }
       {!errored && (
-        <Image
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
           key={retryKey}
-          fill
           src={panel.imageUrl}
           alt={panel.text}
           onLoad={() => setLoaded(true)}
           onError={() => setErrored(true)}
-          className={`object-cover transition-opacity duration-700 group-hover:scale-105 ${loaded ? "opacity-100" : "opacity-0"}`}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 group-hover:scale-105 ${loaded ? "opacity-100" : "opacity-0"}`}
         />
       )}
 
