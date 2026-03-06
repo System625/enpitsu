@@ -15,9 +15,11 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: ../infrastructure/Dockerfile.backend
+      context: .
+      dockerfile: infrastructure/Dockerfile.backend
     ports:
       - "8000:8000"
+    env_file:
+      - backend/.env
     volumes:
       - ./backend:/app
