@@ -56,11 +56,11 @@ class ImageGenerator:
             )
 
             if response.generated_images:
-                image_data = response.generated_images[0].image.image_bytes
-                if image_data is None:
+                img = response.generated_images[0].image
+                if img is None or img.image_bytes is None:
                     logger.warning("Imagen returned image with no bytes.")
                     return None
-                return base64.b64encode(image_data).decode("utf-8")
+                return base64.b64encode(img.image_bytes).decode("utf-8")
 
             logger.warning("Imagen returned no images.")
             return None
