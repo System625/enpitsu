@@ -1,14 +1,75 @@
-import os
 import asyncio
 import logging
+import os
 from typing import Callable
+
 from google import genai
 from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Vertex AI Live API model (works with VERTEX_EXPRESS_API_KEY)
+# Vertex AI Live API model (confirmed working with ADC)
 LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
+
+# Tool definitions for structured panel generation and editing
+COMIC_TOOLS = [
+    types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="generate_comic_panel",
+                description=(
+                    "Generate a comic book panel image from a visual description. "
+                    "Call this whenever you want to render a scene as a comic panel."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "visual_description": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "Detailed visual description of the panel: setting, characters, "
+                                "action, lighting, composition, camera angle."
+                            ),
+                        ),
+                        "caption": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "The comic book speech bubble text, internal monologue, or dramatic "
+                                "narration for this panel. Max 12 words. Authentic comic voice."
+                            ),
+                        ),
+                    },
+                    required=["visual_description", "caption"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="edit_existing_panel",
+                description=(
+                    "Regenerate an existing comic panel with new instructions. "
+                    "Use when the user asks to change something about a panel that was already created."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "panel_number": types.Schema(
+                            type=types.Type.INTEGER,
+                            description="The 1-based panel number to edit.",
+                        ),
+                        "new_description": types.Schema(
+                            type=types.Type.STRING,
+                            description="Updated visual description for the panel.",
+                        ),
+                        "new_caption": types.Schema(
+                            type=types.Type.STRING,
+                            description="Updated caption/dialogue for the panel. Max 12 words.",
+                        ),
+                    },
+                    required=["panel_number", "new_description", "new_caption"],
+                ),
+            ),
+        ]
+    )
+]
 
 
 def make_client() -> genai.Client:
@@ -45,25 +106,23 @@ class GeminiAgent:
         self.client = make_client()
         self.session = None
         self._ready = asyncio.Event()
+        self._stop = False
 
     async def connect(self, system_instruction: str, on_message: Callable):
         """
         Opens a Gemini Multimodal Live API session and streams all
-        incoming messages (text + audio) to the on_message callback.
+        incoming messages to the on_message callback.
         Automatically reconnects when the session ends after a turn.
         """
         config = types.LiveConnectConfig(
             system_instruction=system_instruction,
             response_modalities=["AUDIO"],  # type: ignore[arg-type]
             speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                )
+                voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede"))
             ),
-            # Transcribe the agent's audio output so we can extract GENERATE_PANEL tokens
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            # Transcribe the user's mic input so we can log/debug what was heard
             input_audio_transcription=types.AudioTranscriptionConfig(),
+            tools=COMIC_TOOLS,
         )
 
         self._stop = False
@@ -105,17 +164,32 @@ class GeminiAgent:
         """
         await asyncio.wait_for(self._ready.wait(), timeout=15)
         if self.session:
-            await self.session.send_realtime_input(
-                audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
-            )
+            logger.debug(f"Sending audio chunk: {len(audio_data)} bytes")
+            await self.session.send_realtime_input(audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000"))
 
     async def send_audio_end(self):
         """
         Signals end of user's audio turn so Gemini knows to start responding.
+        Uses ActivityEnd for explicit VAD signalling.
         """
         await asyncio.wait_for(self._ready.wait(), timeout=15)
         if self.session:
+            logger.info("Sending ActivityEnd to Gemini (audio turn complete)")
             await self.session.send_realtime_input(activity_end=types.ActivityEnd())
+
+    async def send_tool_response(self, function_call_id: str, function_name: str, response: dict):
+        """Sends a tool function response back to Gemini after executing a tool call."""
+        await asyncio.wait_for(self._ready.wait(), timeout=15)
+        if self.session:
+            await self.session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        id=function_call_id,
+                        name=function_name,
+                        response=response,
+                    )
+                ]
+            )
 
     def get_system_instruction(self, story_text: str) -> str:
         """Constructs the Creative Director system prompt with the story injected."""
@@ -128,10 +202,12 @@ STORY TEXT:
 YOUR RESPONSIBILITIES:
 1. Act as a warm, creative collaborator. Use a friendly, professional tone.
 2. Read the story and propose panel layouts (e.g., "For this scene, I suggest a wide cinematic panel showing the hero's arrival").
-3. Ask the user for their creative preferences — art style, mood, panel composition.
-4. Respond to the user's voice and text input in real-time.
-5. When you are ready to render a panel, clearly describe it visually so it can be generated.
+3. Respond to the user's voice and text input in real-time.
+4. When you want to render a panel, call the generate_comic_panel() tool with a visual description and caption.
+5. When the user asks to change or edit an existing panel, call the edit_existing_panel() tool.
 6. Keep responses focused and concise — the user is in a live creative session.
+7. Do not ask for permission before generating panels — pick sensible creative defaults and generate immediately.
+8. If the user asks for multiple panels or to illustrate the whole story, call generate_comic_panel() multiple times in one response.
 
 IMPORTANT: You will receive audio from the user. Listen carefully, acknowledge their input, and respond conversationally.
 """

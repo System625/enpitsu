@@ -1,0 +1,20 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# E = pycodestyle errors, F = pyflakes, I = isort, W = warnings
+select = ["E", "F", "I", "W"]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "F401",  # unused imports — too noisy during active dev
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportMissingModuleSource = false
+reportUnusedImport = false
+# Exclude the venv from type checking
+exclude = [".venv", "__pycache__"]

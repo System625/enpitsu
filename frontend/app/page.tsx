@@ -2,11 +2,10 @@ import { Suspense } from "react";
 import { AgentControlCenter } from "@/components/AgentControlCenter";
 import { ComicCanvas } from "@/components/ComicCanvas";
 import { ProjectLoader } from "@/components/ProjectLoader";
-import { AuthGuard } from "@/components/AuthGuard";
 
 export default function Home() {
   return (
-    <AuthGuard>
+    <>
       <Suspense>
         <ProjectLoader />
       </Suspense>
@@ -14,6 +13,6 @@ export default function Home() {
         <AgentControlCenter />
         <ComicCanvas />
       </div>
-    </AuthGuard>
+    </>
   );
 }
