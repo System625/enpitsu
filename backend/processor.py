@@ -1,5 +1,4 @@
 import io
-import os
 import logging
 from pypdf import PdfReader
 from docx import Document

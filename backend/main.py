@@ -1,8 +1,9 @@
-import os
+import re
 import uuid
 import asyncio
 import json
 import logging
+import base64
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
@@ -44,11 +45,12 @@ async def upload_story(file: UploadFile = File(...)):
     """
     Accepts PDF/Word file uploads, extracts text, and initializes a session.
     """
-    if not file.filename.lower().endswith(('.pdf', '.docx')):
+    filename = file.filename or ""
+    if not filename.lower().endswith(('.pdf', '.docx')):
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
 
     content = await file.read()
-    text = await StoryProcessor.extract_text(content, file.filename)
+    text = await StoryProcessor.extract_text(content, filename)
 
     if not text:
         raise HTTPException(status_code=400, detail="Could not extract text from file.")
@@ -57,20 +59,20 @@ async def upload_story(file: UploadFile = File(...)):
     scenes = StoryProcessor.break_into_scenes(text)
 
     sessions[session_id] = {
-        "filename": file.filename,
+        "filename": filename,
         "status": "uploaded",
         "story_text": text,
         "scenes": scenes,
         "current_scene_index": 0,
-        "current_style": "Manga",
+        "current_style": "American",
         "panels": [],
     }
 
-    logger.info(f"Session created: {session_id} for file: {file.filename}. Extracted {len(scenes)} scenes.")
+    logger.info(f"Session created: {session_id} for file: {filename}. Extracted {len(scenes)} scenes.")
 
     return {
         "session_id": session_id,
-        "filename": file.filename,
+        "filename": filename,
         "scene_count": len(scenes),
     }
 
@@ -135,46 +137,101 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=1011)
         return
 
+    # Accumulate transcription chunks across a full agent turn
+    transcription_buffer = []
+
+    async def flush_transcription():
+        """Process the accumulated transcription buffer as a complete turn."""
+        nonlocal transcription_buffer
+        full_text = " ".join(transcription_buffer).strip()
+        transcription_buffer = []
+        if not full_text:
+            return
+
+        logger.info(f"Agent transcription: {full_text}")
+
+        # Normalise transcription artifacts: Gemini sometimes inserts spaces inside tokens
+        # e.g. "GEN ERATE_PANEL:" or "GENERATE_ PANEL:" → "GENERATE_PANEL:"
+        normalised_text = re.sub(r'GEN\s*ERATE\s*_\s*PANEL\s*:', 'GENERATE_PANEL:', full_text, flags=re.IGNORECASE)
+        normalised_text = re.sub(r'CAP\s*TION\s*:', 'CAPTION:', normalised_text, flags=re.IGNORECASE)
+        full_text = normalised_text
+
+        if "GENERATE_PANEL:" in full_text:
+            # Split on every GENERATE_PANEL: token to support multiple panels per turn
+            # Format: [narrative_text, prompt1, narrative_text2, prompt2, ...]
+            parts = full_text.split("GENERATE_PANEL:")
+            intro_text = parts[0].strip()
+            if intro_text:
+                await websocket.send_json({"type": "agent_response", "text": intro_text, "status": "speaking"})
+
+            base_panel_number = len(session_data["panels"]) + 1
+            panel_specs = []
+            for i, panel_part in enumerate(parts[1:]):
+                raw = panel_part.strip().replace("\n", " ").strip()
+                if "CAPTION:" in raw:
+                    caption_split = raw.split("CAPTION:", 1)
+                    prompt = caption_split[0].strip()
+                    caption = caption_split[1].strip()
+                else:
+                    prompt = raw
+                    caption = f"Panel {base_panel_number + i}"
+                panel_specs.append((base_panel_number + i, prompt, caption))
+
+            # Send all skeletons immediately so the canvas fills up at once
+            for panel_number, prompt, caption in panel_specs:
+                await websocket.send_json({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
+            await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Drawing {len(panel_specs)} panel(s)..."})
+
+            # Generate all panels concurrently — images pop in as they finish
+            async def generate_and_send(panel_number: int, prompt: str, caption: str):
+                style = session_data.get("current_style", "american")
+                image_b64 = await image_gen.generate_panel(prompt, style=style)
+                if image_b64:
+                    session_data["panels"].append({"prompt": prompt, "image": image_b64, "style": style, "scene_index": session_data["current_scene_index"]})
+                    await websocket.send_json({"type": "panel_generated", "image": image_b64, "prompt": prompt, "text": caption, "panel_number": panel_number})
+                else:
+                    await websocket.send_json({"type": "agent_response", "text": f"Panel {panel_number} hit a snag — ask me to retry it.", "status": "idle"})
+
+            await asyncio.gather(*[generate_and_send(n, p, c) for n, p, c in panel_specs])
+            await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+        else:
+            await websocket.send_json({"type": "agent_response", "text": full_text, "status": "speaking"})
+            await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+
     async def on_agent_message(message):
         """Callback: handles LiveServerMessage from Gemini and forwards to frontend."""
         try:
-            # LiveServerMessage structure: message.server_content.model_turn.parts
             sc = getattr(message, 'server_content', None)
             if not sc:
                 return
 
-            # Output audio transcription (text of what agent is saying)
-            transcription = getattr(sc, 'output_transcription', None)
-            if transcription and getattr(transcription, 'text', None):
-                text = transcription.text
-                if "GENERATE_PANEL:" in text:
-                    msg_parts = text.split("GENERATE_PANEL:", 1)
-                    pre_text = msg_parts[0].strip()
-                    prompt = msg_parts[1].strip()
-                    if pre_text:
-                        await websocket.send_json({"type": "agent_response", "text": pre_text, "status": "speaking"})
-                    await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Generating panel: {prompt}..."})
-                    image_b64 = await image_gen.generate_panel(prompt, style=session_data.get("current_style", "Manga"))
-                    if image_b64:
-                        session_data["panels"].append({"prompt": prompt, "image": image_b64, "style": session_data.get("current_style", "Manga"), "scene_index": session_data["current_scene_index"]})
-                        await websocket.send_json({"type": "panel_generated", "image": image_b64, "prompt": prompt, "text": pre_text})
-                    else:
-                        await websocket.send_json({"type": "agent_response", "text": "Panel generation failed, let's try again.", "status": "idle"})
-                else:
-                    await websocket.send_json({"type": "agent_response", "text": text, "status": "speaking"})
+            # Log what the user said (input transcription) for debugging
+            input_transcription = getattr(sc, 'input_transcription', None)
+            if input_transcription and getattr(input_transcription, 'text', None):
+                logger.info(f"User said: {input_transcription.text}")
 
-            # Audio chunks from model_turn.parts
+            # Accumulate agent's output transcription (contains GENERATE_PANEL tokens)
+            output_transcription = getattr(sc, 'output_transcription', None)
+            if output_transcription and getattr(output_transcription, 'text', None):
+                transcription_buffer.append(output_transcription.text)
+
+            # Forward raw audio chunks to the frontend
             model_turn = getattr(sc, 'model_turn', None)
             if model_turn:
-                import base64
-                for part in (model_turn.parts or []):
-                    if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
-                        audio_b64 = base64.b64encode(part.inline_data.data).decode('utf-8')
+                for part in getattr(model_turn, 'parts', []):
+                    inline_data = getattr(part, 'inline_data', None)
+                    if inline_data and getattr(inline_data, 'data', None):
+                        audio_b64 = base64.b64encode(inline_data.data).decode('utf-8')
                         await websocket.send_json({
                             "type": "agent_audio",
                             "audio": audio_b64,
-                            "mime_type": part.inline_data.mime_type,
+                            "mime_type": getattr(inline_data, 'mime_type', 'audio/pcm;rate=24000'),
                         })
+
+            # turn_complete fires when Gemini finishes its response — flush then
+            turn_done = getattr(sc, 'turn_complete', False) or getattr(message, 'turn_complete', False)
+            if turn_done:
+                await flush_transcription()
 
         except Exception as e:
             logger.error(f"Error forwarding agent message: {e}")
@@ -182,8 +239,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Build system instruction
     system_instruction = agent.get_system_instruction(session_data['story_text'])
     system_instruction += (
-        "\nWhen you want to generate a comic panel, output 'GENERATE_PANEL: [short visual description]' "
-        "at the end of your response. Keep the description concise and visual.\n"
+        "\n\nCRITICAL PANEL GENERATION RULES:\n"
+        "- Every time you want to render a comic panel, output the exact token: GENERATE_PANEL: followed by a visual description, then CAPTION: followed by a punchy in-world line. Everything on ONE line.\n"
+        "- NEVER ask the user for style or mood preferences before generating — pick sensible defaults and generate immediately.\n"
+        "- If the user asks for multiple panels or to complete the whole story, output ALL panels in a single response, each on its own line.\n"
+        "- Format for each panel (ONE line, no internal line breaks):\n"
+        "  GENERATE_PANEL: <visual scene description> CAPTION: <punchy comic dialogue or narration max 10 words>\n"
+        "- Examples:\n"
+        "  GENERATE_PANEL: Dark rooftop at night, lone figure in a trench coat CAPTION: The city never sleeps. Neither do I.\n"
+        "  GENERATE_PANEL: Hero leaps across rooftops, city lights below CAPTION: Nowhere to run, Vasquez!\n"
+        "  GENERATE_PANEL: Villain revealed in shadowy lair CAPTION: I've been expecting you.\n"
+        "- The CAPTION must be authentic comic book text — character dialogue, internal monologue, or dramatic narration. Never describe the image.\n"
+        "- If the user asks for the next panel, generate it immediately without asking questions.\n"
     )
 
     # Start Gemini live session in background
@@ -202,7 +269,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 logger.info(f"Received [{msg_type}] from session {session_id}")
 
                 if msg_type == "user_message":
+                    # Flush any buffered transcription from the previous turn before sending new input
+                    await flush_transcription()
                     await agent.send_text(data.get("text", ""))
+
+                elif msg_type == "audio_turn_complete":
+                    # Frontend stopped the mic — tell Gemini to start responding
+                    await agent.send_audio_end()
 
                 elif msg_type == "style_update":
                     new_style = data.get("style", "Manga")

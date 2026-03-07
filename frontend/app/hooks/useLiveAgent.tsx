@@ -2,39 +2,47 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
 import { createProject, saveProject, loadProject } from "./useProjects";
-import {
-  ParsedStory,
-  StoryScene,
-  extractTextFromFile,
-  parseStory,
-  buildScenePrompt,
-  buildSceneCaption,
-  buildNegativePrompt,
-} from "./useStoryParser";
+import { useAuth } from "./useAuth";
 
-export type ComicStyle = "american" | "manga" | "franco_belgian" | "manhwa" | "manhua";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
-async function fetchAiCaption(scene: StoryScene, style: ComicStyle): Promise<string | null> {
+/** Play a chunk of base64-encoded PCM audio through the Web Audio API, queued sequentially. */
+let _nextPlayTime = 0;
+function playPcmChunk(base64Data: string, mimeType: string, audioCtx: AudioContext, analyser: AnalyserNode | null): void {
   try {
-    const res = await fetch("/api/caption", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        narrative: scene.narrative,
-        action: scene.action,
-        mood: scene.mood,
-        characters: scene.characters,
-        dialogue: scene.dialogue,
-        style,
-      }),
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.caption ?? null;
-  } catch {
-    return null;
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const rateMatch = mimeType.match(/rate=(\d+)/);
+    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+
+    // Raw PCM is Int16 little-endian
+    const pcm16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 32768.0;
+
+    const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+    buffer.copyToChannel(float32, 0);
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    if (analyser) {
+      source.connect(analyser);
+      analyser.connect(audioCtx.destination);
+    } else {
+      source.connect(audioCtx.destination);
+    }
+
+    // Schedule this chunk to start after the previous one finishes
+    const startAt = Math.max(audioCtx.currentTime, _nextPlayTime);
+    source.start(startAt);
+    _nextPlayTime = startAt + buffer.duration;
+  } catch (e) {
+    console.error("PCM playback error:", e);
   }
 }
+
+export type ComicStyle = "american" | "manga" | "franco_belgian" | "manhwa" | "manhua";
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -43,6 +51,7 @@ export interface ComicPanel {
   imageUrl: string;
   text: string;
   index: number;
+  loading?: boolean;
 }
 
 interface LiveAgentContextType {
@@ -51,85 +60,26 @@ interface LiveAgentContextType {
   currentStyle: ComicStyle;
   isRecording: boolean;
   audioAnalyser: AnalyserNode | null;
+  setAudioAnalyser: (analyser: AnalyserNode | null) => void;
   projectName: string;
   currentProjectId: string;
   storyLoaded: boolean;
+  connectionStatus: "connected" | "reconnecting" | "disconnected" | null;
   setAgentState: (state: AgentState) => void;
   setCurrentStyle: (style: ComicStyle) => void;
   setProjectName: (name: string) => void;
   startRecording: () => void;
   stopRecording: (userText?: string) => void;
+  sendAudioChunk: (pcmBytes: ArrayBuffer) => void;
   interruptAgent: () => void;
   uploadStory: (file: File) => void;
   saveCurrentProject: () => void;
-  loadProjectById: (id: string) => void;
+  loadProjectById: (id: string) => Promise<void>;
   exportProjectAsZip: () => Promise<void>;
 }
 
 const LiveAgentContext = createContext<LiveAgentContextType | null>(null);
 
-const styleModifiers: Record<ComicStyle, string> = {
-  american: "classic american superhero comic book style, bold lines, vibrant dynamic colors",
-  manga: "japanese manga style, black and white ink drawing, screentone shading",
-  franco_belgian: "bande dessinee, ligne claire style, clear line drawing, tintin aesthetic, detailed background",
-  manhwa: "korean webtoon manhwa style, high quality digital painting, aesthetic lighting",
-  manhua: "chinese manhua style, wuxia fantasy aesthetic, intricate details",
-};
-
-interface PromptResult {
-  prompt: string;
-  negativePrompt: string;
-}
-
-/** Parse free-form user text into an image prompt + negative prompt. */
-function buildCharacterPrompt(text: string, style: ComicStyle): PromptResult {
-  const lower = text.toLowerCase();
-
-  let genderDesc = "a character";
-  let negativePrompt = "";
-
-  const isFemale = /\b(female|woman|girl|she|her|lady|ladies|women)\b/.test(lower);
-  const isMale   = /\b(male|man|boy|he|his|guy|dude|men)\b/.test(lower);
-
-  const antiPortrait = "close-up, closeup, extreme close-up, portrait, headshot, face only, face filling frame, bust shot, chest up, shoulders up, cropped, macro, selfie, mugshot, zoomed in face, talking head";
-
-  if (isFemale) {
-    genderDesc = "a woman";
-    negativePrompt = `male, man, boy, masculine, beard, mustache, ${antiPortrait}`;
-  } else if (isMale) {
-    genderDesc = "a man";
-    negativePrompt = `female, woman, girl, feminine, ${antiPortrait}`;
-  } else {
-    negativePrompt = antiPortrait;
-  }
-
-  const roleParts: string[] = [];
-
-  if (/\b(antagonist|villain|enemy|rival|evil|dark)\b/.test(lower)) {
-    roleParts.push("villain in a dark outfit, menacing stance, dramatic lighting");
-  } else if (/\b(friend|companion|sidekick|ally|best friend)\b/.test(lower)) {
-    roleParts.push("friendly companion, warm smile, casual outfit, relaxed standing pose");
-  } else if (/\b(hero|protagonist|mc|main character)\b/.test(lower)) {
-    roleParts.push("heroic protagonist, determined expression, dynamic action pose");
-  } else {
-    roleParts.push("character in a dynamic pose");
-  }
-
-  const colourMatch = lower.match(/\b(red|blue|green|black|white|blonde|silver|purple|pink|orange|golden)\s+hair\b/);
-  if (colourMatch) roleParts.push(`with ${colourMatch[0]}`);
-
-  const eyeMatch = lower.match(/\b(red|blue|green|black|golden|silver|purple|pink)\s+eyes\b/);
-  if (eyeMatch) roleParts.push(`and ${eyeMatch[0]}`);
-
-  const prompt = [
-    `extreme wide shot, full body from head to feet, entire figure visible, ${genderDesc} standing in a detailed environment, camera pulled far back`,
-    roleParts.join(", "),
-    styleModifiers[style],
-    "comic book panel, detailed background, dynamic composition, high quality illustration",
-  ].filter(Boolean).join(", ");
-
-  return { prompt, negativePrompt };
-}
 
 function speak(text: string, onEnd?: () => void): void {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
@@ -164,90 +114,247 @@ function speak(text: string, onEnd?: () => void): void {
   window.speechSynthesis.speak(utterance);
 }
 
-/** Build panels from parsed story scenes */
-function scenesToPanels(
-  scenes: StoryScene[],
-  parsedStory: ParsedStory,
-  style: ComicStyle,
-  startIdx: number,
-  baseId: number,
-): ComicPanel[] {
-  return scenes.map((scene, i) => {
-    const seed = Math.floor(Math.random() * 10000) + i * 41;
-    const prompt = buildScenePrompt(scene, parsedStory.characters, style);
-    const caption = buildSceneCaption(scene);
-    const negative = buildNegativePrompt(scene, parsedStory.characters);
-
-    const params: Record<string, string> = {
-      prompt,
-      seed: String(seed),
-      width: "1024",
-      height: "1024",
-    };
-    if (negative) params.negative_prompt = negative;
-
-    return {
-      id: `panel_${baseId}_${i}`,
-      imageUrl: `/api/image?${new URLSearchParams(params)}`,
-      text: caption,
-      index: startIdx + i,
-    };
-  });
-}
 
 export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
   const [agentState, setAgentState] = useState<AgentState>("idle");
   const [panels, setPanels] = useState<ComicPanel[]>([]);
   const [currentStyle, setCurrentStyle] = useState<ComicStyle>("american");
   const [isRecording, setIsRecording] = useState(false);
-  const [audioAnalyser] = useState<AnalyserNode | null>(null);
+  const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const [projectName, setProjectName] = useState("Untitled Story");
+  const playbackAnalyserRef = useRef<AnalyserNode | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<string>(() =>
     createProject("Untitled Story", "american").id
   );
 
-  // Story state — tracks parsed content and progress
-  const parsedStoryRef = useRef<ParsedStory | null>(null);
-  const storyProgressRef = useRef<number>(0); // next scene index to generate
   const [storyLoaded, setStoryLoaded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  // Lazy-created AudioContext for PCM playback — only created on first agent_audio message
   const audioContextRef = useRef<AudioContext | null>(null);
+  // Track whether we've actually received PCM audio in this session
+  const receivingPcmRef = useRef<boolean>(false);
   const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingUserTextRef = useRef<string>("");
+  const reconnectAttemptsRef = useRef<number>(0);
+  const [connectionStatus, setConnectionStatus] = useState<"connected" | "reconnecting" | "disconnected" | null>(null);
 
+  // Background music during "thinking" state
+  const thinkingMusicRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext) as typeof window.AudioContext;
-      audioContextRef.current = new AudioContextClass();
+    if (agentState === "thinking") {
+      if (!thinkingMusicRef.current) {
+        thinkingMusicRef.current = new Audio("/thinking-music.mp3");
+        thinkingMusicRef.current.loop = true;
+        thinkingMusicRef.current.volume = 0;
+      }
+      const music = thinkingMusicRef.current;
+      music.play().catch(() => {});
+      // Fade in
+      let vol = 0;
+      const fadeIn = setInterval(() => {
+        vol = Math.min(vol + 0.02, 0.15);
+        music.volume = vol;
+        if (vol >= 0.15) clearInterval(fadeIn);
+      }, 50);
+      return () => clearInterval(fadeIn);
+    } else if (thinkingMusicRef.current) {
+      const music = thinkingMusicRef.current;
+      // Fade out
+      let vol = music.volume;
+      const fadeOut = setInterval(() => {
+        vol = Math.max(vol - 0.02, 0);
+        music.volume = vol;
+        if (vol <= 0) {
+          clearInterval(fadeOut);
+          music.pause();
+          music.currentTime = 0;
+        }
+      }, 50);
+      return () => clearInterval(fadeOut);
     }
-    return () => { audioContextRef.current?.close(); };
-  }, []);
+  }, [agentState]);
 
-  useEffect(() => {
-    console.log("WebSocket would connect here");
-    return () => {
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      const ws = wsRef.current;
-      ws?.close();
+  const connectWebSocket = useCallback((sessionId: string) => {
+    const wsUrl = BACKEND_URL.replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsUrl}/ws/session/${sessionId}`);
+    wsRef.current = ws;
+    sessionIdRef.current = sessionId;
+    receivingPcmRef.current = false; // reset per session — TTS is fallback until PCM arrives
+    // Close and discard any previous AudioContext so chunks don't pile up across sessions
+    audioContextRef.current?.close().catch(() => {});
+    audioContextRef.current = null;
+    playbackAnalyserRef.current = null;
+    setAudioAnalyser(null);
+    _nextPlayTime = 0;
+
+    ws.onopen = () => {
+      console.log("WebSocket connected for session:", sessionId);
+      reconnectAttemptsRef.current = 0;
+      setConnectionStatus("connected");
+      // Immediately sync the current style so backend doesn't use its default
+      ws.send(JSON.stringify({ type: "style_update", style: currentStyle }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+
+        // Clear thinking timeout on any response from backend
+        if (thinkingTimerRef.current) { clearTimeout(thinkingTimerRef.current); thinkingTimerRef.current = null; }
+
+        if (msg.type === "panel_loading") {
+          // Add a loading skeleton — deduplicate in case backend reconnects and resends
+          setPanels(prev => {
+            const skeletonId = `loading_panel_${msg.panel_number}`;
+            if (prev.some(p => p.id === skeletonId)) return prev;
+            return [...prev, {
+              id: skeletonId,
+              imageUrl: "",
+              text: msg.caption ?? "",
+              index: prev.length,
+              loading: true,
+            }];
+          });
+        }
+
+        if (msg.type === "panel_generated") {
+          // Replace the loading skeleton for this panel number, or append if not found
+          setPanels(prev => {
+            const skeletonId = `loading_panel_${msg.panel_number}`;
+            const skeletonIdx = prev.findIndex(p => p.id === skeletonId);
+            const newPanel = {
+              id: `ws_panel_${Date.now()}_${skeletonIdx >= 0 ? skeletonIdx : prev.length}`,
+              imageUrl: `data:image/jpeg;base64,${msg.image}`,
+              text: msg.text ?? "",
+              index: skeletonIdx >= 0 ? skeletonIdx : prev.length,
+              loading: false,
+            };
+            if (skeletonIdx >= 0) {
+              const updated = [...prev];
+              updated[skeletonIdx] = newPanel;
+              return updated;
+            }
+            return [...prev, newPanel];
+          });
+        }
+
+        if (msg.type === "agent_response") {
+          setAgentState("speaking");
+          // Use browser TTS only if we haven't received real PCM audio in this session
+          if (!receivingPcmRef.current) {
+            speak(msg.text, () => setAgentState("idle"));
+          } else {
+            // PCM audio is coming — let agent_audio chunks drive playback
+            // Reset to idle after a generous timeout in case audio ends silently
+            if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+            speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 12000);
+          }
+        }
+
+        if (msg.type === "agent_audio") {
+          setAgentState("speaking");
+          receivingPcmRef.current = true;
+          if (msg.audio) {
+            // Lazily create AudioContext on first audio message (avoids autoplay policy issues)
+            if (!audioContextRef.current) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+              audioContextRef.current = new AudioCtx();
+            }
+            const ctx = audioContextRef.current;
+            if (ctx.state === "suspended") ctx.resume().catch(() => {});
+            // Create playback analyser for visualization
+            if (!playbackAnalyserRef.current) {
+              playbackAnalyserRef.current = ctx.createAnalyser();
+              playbackAnalyserRef.current.fftSize = 256;
+              setAudioAnalyser(playbackAnalyserRef.current);
+            }
+            playPcmChunk(msg.audio, msg.mime_type ?? "audio/pcm;rate=24000", ctx, playbackAnalyserRef.current);
+          }
+        }
+
+        if (msg.type === "status_update") {
+          if (msg.status === "generating" || msg.status === "thinking") {
+            setAgentState("thinking");
+          } else if (msg.status === "idle") {
+            setAgentState("idle");
+          }
+        }
+
+        // Panel editing: replace an existing panel by panel_number
+        if (msg.type === "panel_updated") {
+          setPanels(prev => prev.map(p => {
+            // Match by panel_number encoded in the id, or by index
+            const match = p.id.includes(`panel_${msg.panel_number}`) || p.index === msg.panel_number;
+            if (match) {
+              return {
+                ...p,
+                imageUrl: `data:image/jpeg;base64,${msg.image}`,
+                text: msg.text ?? p.text,
+                loading: false,
+              };
+            }
+            return p;
+          }));
+        }
+
+        if (msg.type === "error") {
+          console.error("Backend error:", msg.message);
+          setAgentState("idle");
+        }
+      } catch (e) {
+        console.error("WS message parse error:", e);
+      }
+    };
+
+    ws.onerror = (e) => console.error("WebSocket error:", e);
+
+    ws.onclose = (event) => {
+      console.log("WebSocket closed for session:", sessionId, "code:", event.code);
+      wsRef.current = null;
+      // Auto-reconnect with exponential backoff (up to 5 attempts)
+      if (!event.wasClean && reconnectAttemptsRef.current < 5) {
+        setConnectionStatus("reconnecting");
+        const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 16000);
+        console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1}/5)...`);
+        setTimeout(() => {
+          reconnectAttemptsRef.current++;
+          connectWebSocket(sessionId);
+        }, delay);
+      } else if (reconnectAttemptsRef.current >= 5) {
+        setConnectionStatus("disconnected");
+      }
     };
   }, []);
 
-  // Auto-save on every panels change (debounced)
   useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+    };
+  }, []);
+
+  // Auto-save to Firestore/Storage on panel changes (debounced)
+  useEffect(() => {
+    if (!user || panels.length === 0) return;
+    // Only save panels that are fully loaded with a real image URL
+    const saveable = panels.filter(p => !p.loading && p.imageUrl && p.imageUrl.length > 0);
+    if (saveable.length === 0) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
-      saveProject({
+      saveProject(user.uid, {
         id: currentProjectId,
         name: projectName,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         style: currentStyle,
-        panels,
-      });
-    }, 500);
+        panels: saveable,
+      }).catch(err => console.error("Auto-save failed:", err));
+    }, 1000);
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
@@ -261,6 +368,15 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const sendAudioChunk = useCallback((pcmBytes: ArrayBuffer) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.debug("[audio] Sending PCM chunk:", pcmBytes.byteLength, "bytes");
+      wsRef.current.send(pcmBytes);
+    } else {
+      console.warn("[audio] WebSocket not open, dropping audio chunk");
+    }
+  }, []);
+
   const startRecording = useCallback(() => {
     setIsRecording(true);
     setAgentState("listening");
@@ -268,123 +384,33 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   const stopRecording = useCallback((userText?: string) => {
     setIsRecording(false);
-    setAgentState("thinking");
 
     const text = userText ?? pendingUserTextRef.current ?? "";
     pendingUserTextRef.current = "";
 
-    const isStoryContinuation = /\b(finish|continue|next|rest|story|chapter|pdf|volume|sequence|what happens|unfold|arc|plot|more|go on|keep going)\b/i.test(text);
-
-    // If we have a parsed story and this is a continuation request, use actual scenes
-    const story = parsedStoryRef.current;
-    if (story && isStoryContinuation) {
-      const progress = storyProgressRef.current;
-      const remaining = story.scenes.slice(progress);
-
-      if (remaining.length === 0) {
-        // Entire story already generated
-        setAgentState("speaking");
-        speak("The entire story has been illustrated! You can export it as a PDF.", () => setAgentState("idle"));
-        speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 6000);
-        return;
-      }
-
-      // Generate all remaining scenes
-      const baseId = Date.now();
-      let insertedPanels: ComicPanel[] = [];
-      setPanels(prev => {
-        insertedPanels = scenesToPanels(remaining, story, currentStyle, prev.length, baseId);
-        return [...prev, ...insertedPanels];
-      });
-
-      // Enrich captions with AI in the background
-      remaining.forEach((scene, i) => {
-        fetchAiCaption(scene, currentStyle).then(caption => {
-          if (!caption) return;
-          const panelId = insertedPanels[i]?.id;
-          if (!panelId) return;
-          setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
-        });
-      });
-
-      storyProgressRef.current = story.scenes.length; // mark all as generated
-
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setAgentState("speaking");
-      const msg = remaining.length > 1
-        ? `Generating the remaining ${remaining.length} scenes to finish your story!`
-        : "Generating the final scene!";
-      speak(msg, () => setAgentState("idle"));
-      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 8000);
+      speak("Please upload a story first to connect to the agent.", () => setAgentState("idle"));
+      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 5000);
       return;
     }
 
-    // Non-story request (character prompt, etc.) — original logic
-    const wordNums: Record<string, number> = {
-      one: 1, two: 2, three: 3, four: 4, five: 5,
-      six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-      twelve: 12, fifteen: 15, twenty: 20,
-    };
-    const digitMatch = text.match(/\b(\d+)\s*(panels?|images?|shots?|pages?)?\b/i);
-    const wordMatch  = text.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty)\s*(panels?|images?|shots?|pages?)?\b/i);
+    setAgentState("thinking");
 
-    let panelCount = 1;
-    if (digitMatch) {
-      panelCount = Math.min(20, Math.max(1, parseInt(digitMatch[1], 10)));
-    } else if (wordMatch) {
-      panelCount = wordNums[wordMatch[1].toLowerCase()] ?? 1;
-    } else if (/\b(scene|multiple|panels?|sequence|series)\b/i.test(text)) {
-      panelCount = 3;
+    // Safety timeout: if backend doesn't respond in 30s, reset to idle
+    if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
+    thinkingTimerRef.current = setTimeout(() => setAgentState("idle"), 30000);
+
+    if (text) {
+      // Text input path (typed prompt or SpeechRecognition fallback)
+      console.debug("[audio] Sending text message:", text.slice(0, 50));
+      wsRef.current.send(JSON.stringify({ type: "user_message", text }));
+    } else {
+      // PCM audio path — signal end of user's audio turn
+      console.debug("[audio] Sending audio_turn_complete");
+      wsRef.current.send(JSON.stringify({ type: "audio_turn_complete" }));
     }
-
-    const baseId = Date.now();
-
-    setPanels(prev => {
-      const startIdx = prev.length;
-      const placeholders: ComicPanel[] = [];
-      for (let i = 0; i < panelCount; i++) {
-        const seed = Math.floor(Math.random() * 10000) + i * 37;
-        const result = buildCharacterPrompt(text, currentStyle);
-
-        const params: Record<string, string> = {
-          prompt: result.prompt,
-          seed: String(seed),
-          width: "1024",
-          height: "768",
-        };
-        if (result.negativePrompt) params.negative_prompt = result.negativePrompt;
-        placeholders.push({
-          id: `panel_${baseId}_${i}`,
-          imageUrl: `/api/image?${new URLSearchParams(params)}`,
-          text: "...",
-          index: startIdx + i,
-        });
-      }
-      return [...prev, ...placeholders];
-    });
-
-    // Fetch AI captions for character panels
-    const fakeScene: StoryScene = {
-      pageNumber: 0,
-      narrative: text,
-      setting: "dynamic environment",
-      characters: [],
-      action: text,
-      dialogue: [],
-      mood: "dramatic",
-    };
-    for (let i = 0; i < panelCount; i++) {
-      const panelId = `panel_${baseId}_${i}`;
-      fetchAiCaption(fakeScene, currentStyle).then(caption => {
-        if (!caption) return;
-        setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
-      });
-    }
-
-    setAgentState("speaking");
-    const dialogueText = panelCount > 1 ? `Generating ${panelCount} panels!` : "Got it!";
-    speak(dialogueText, () => setAgentState("idle"));
-    speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 6000);
-  }, [currentStyle]);
+  }, []);
 
   const uploadStory = useCallback(async (file: File) => {
     setAgentState("thinking");
@@ -392,61 +418,34 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     setProjectName(nameFromFile);
 
     try {
-      // 1. Extract text from file
-      const rawText = await extractTextFromFile(file);
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(`${BACKEND_URL}/upload`, { method: "POST", body: formData });
 
-      // 2. Parse into scenes + characters
-      const parsed = parseStory(rawText);
-      parsedStoryRef.current = parsed;
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
 
-      if (parsed.title && parsed.title !== "Untitled Story") {
-        setProjectName(parsed.title);
-      }
+      const { session_id, scene_count, filename } = await res.json();
 
-      // 3. Generate initial preview — about half, leaving rest for "continue"
-      const previewCount = Math.min(
-        Math.max(3, Math.ceil(parsed.scenes.length / 2)),
-        parsed.scenes.length,
-      );
-      const previewScenes = parsed.scenes.slice(0, previewCount);
-      storyProgressRef.current = previewCount;
+      // Use backend filename to set project name
+      const title = (filename as string).replace(/\.[^.]+$/, "");
+      setProjectName(title);
       setStoryLoaded(true);
 
-      const baseId = Date.now();
-      let insertedPanels: ComicPanel[] = [];
-      setPanels(prev => {
-        insertedPanels = scenesToPanels(previewScenes, parsed, currentStyle, prev.length, baseId);
-        return [...prev, ...insertedPanels];
-      });
-
-      // Enrich captions with AI in the background
-      previewScenes.forEach((scene, i) => {
-        fetchAiCaption(scene, currentStyle).then(caption => {
-          if (!caption) return;
-          const panelId = insertedPanels[i]?.id;
-          if (!panelId) return;
-          setPanels(prev => prev.map(p => p.id === panelId ? { ...p, text: caption } : p));
-        });
-      });
-
-      // 4. Announce what we found
-      const charNames = parsed.characters.map(c => c.name).slice(0, 3).join(", ");
-      const remaining = parsed.scenes.length - previewCount;
-      let announcement = `I've read "${parsed.title}".`;
-      if (charNames) announcement += ` I found characters: ${charNames}.`;
-      announcement += ` Here's a preview of the first ${previewCount} scenes.`;
-      if (remaining > 0) announcement += ` Say "continue" or "finish the story" for the remaining ${remaining} scenes!`;
+      connectWebSocket(session_id);
 
       setAgentState("speaking");
-      speak(announcement, () => setAgentState("idle"));
-      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 12000);
+      speak(
+        `Story uploaded! Found ${scene_count} scenes. Talk to the agent to start illustrating your comic!`,
+        () => setAgentState("idle"),
+      );
+      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 8000);
     } catch (err) {
-      console.error("Upload story error:", err);
+      console.error("Upload error:", err);
       setAgentState("speaking");
-      speak("I had trouble reading that file. Please try a different format.", () => setAgentState("idle"));
+      speak("I had trouble uploading that file. Please try again.", () => setAgentState("idle"));
       speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 6000);
     }
-  }, [currentStyle]);
+  }, [connectWebSocket]);
 
   const interruptAgent = useCallback(() => {
     window.speechSynthesis?.cancel();
@@ -458,24 +457,26 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   }, [clearSpeakingTimer]);
 
   const saveCurrentProject = useCallback(() => {
-    saveProject({
+    if (!user) return;
+    saveProject(user.uid, {
       id: currentProjectId,
       name: projectName,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       style: currentStyle,
       panels,
-    });
-  }, [currentProjectId, projectName, currentStyle, panels]);
+    }).catch(err => console.error("Save failed:", err));
+  }, [user, currentProjectId, projectName, currentStyle, panels]);
 
-  const loadProjectById = useCallback((id: string) => {
-    const project = loadProject(id);
+  const loadProjectById = useCallback(async (id: string) => {
+    if (!user) return;
+    const project = await loadProject(user.uid, id);
     if (!project) return;
     setCurrentProjectId(project.id);
     setProjectName(project.name);
     setCurrentStyle(project.style);
     setPanels(project.panels);
-  }, []);
+  }, [user]);
 
   const exportProjectAsZip = useCallback(async () => {
     const { jsPDF } = await import("jspdf");
@@ -600,7 +601,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "style_change", style: currentStyle }));
+      wsRef.current.send(JSON.stringify({ type: "style_update", style: currentStyle }));
     }
   }, [currentStyle]);
 
@@ -612,14 +613,17 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         currentStyle,
         isRecording,
         audioAnalyser,
+        setAudioAnalyser,
         projectName,
         currentProjectId,
         storyLoaded,
+        connectionStatus,
         setAgentState,
         setCurrentStyle,
         setProjectName,
         startRecording,
         stopRecording,
+        sendAudioChunk,
         interruptAgent,
         uploadStory,
         saveCurrentProject,

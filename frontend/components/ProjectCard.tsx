@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Project, deleteProject } from "@/app/hooks/useProjects";
+import { useAuth } from "@/app/hooks/useAuth";
 
 const STYLE_LABELS: Record<string, string> = {
   american: "American",
@@ -18,6 +19,7 @@ interface ProjectCardProps {
 }
 
 export function ProjectCard({ project, onOpen, onDeleted }: ProjectCardProps) {
+  const { user } = useAuth();
   const [confirming, setConfirming] = useState(false);
 
   const thumbnail = project.panels[0]?.imageUrl ?? null;
@@ -29,7 +31,9 @@ export function ProjectCard({ project, onOpen, onDeleted }: ProjectCardProps) {
 
   const handleDelete = () => {
     if (!confirming) { setConfirming(true); return; }
-    deleteProject(project.id);
+    if (!user) return;
+    deleteProject(user.uid, project.id)
+      .catch(console.error);
     onDeleted(project.id);
   };
 

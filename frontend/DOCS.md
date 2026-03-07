@@ -238,7 +238,7 @@ Firebase Auth is not yet wired in. Here is what to do:
 **Step 1 — Install Firebase SDK:**
 ```bash
 cd frontend
-npm install firebase
+npm install firebase (already installed)
 ```
 
 **Step 2 — Create `lib/firebase.ts`:**
@@ -282,7 +282,7 @@ Create `frontend/.env.local` (never commit this):
 NEXT_PUBLIC_BACKEND_URL=https://enpitsu-backend-xxxx-uc.a.run.app
 
 # Pollinations (optional, for higher rate limits)
-POLLINATIONS_API_KEY=
+POLLINATIONS_API_KEY= check frontend env file
 
 # Firebase (see section 7)
 NEXT_PUBLIC_FIREBASE_API_KEY=

@@ -2,7 +2,6 @@ import asyncio
 import logging
 import base64
 from typing import Optional
-from google import genai
 from google.genai import types
 
 from agent import make_client
@@ -16,7 +15,16 @@ class ImageGenerator:
         self.model_id = model_id
         self.client = make_client()
 
-    async def generate_panel(self, prompt: str, style: str = "Manga") -> Optional[str]:
+    # Maps frontend style keys to Imagen-optimised prompt descriptors
+    STYLE_PROMPTS = {
+        "american":      "American superhero comic book style, bold dynamic lines, vibrant colors, Marvel/DC aesthetic",
+        "manga":         "Japanese manga style, black and white ink, screentone shading, expressive characters",
+        "franco_belgian":"Franco-Belgian bande dessinée style, ligne claire, Tintin/Asterix aesthetic, clean outlines",
+        "manhwa":        "Korean manhwa webtoon style, high quality digital painting, full color, cinematic lighting",
+        "manhua":        "Chinese manhua style, wuxia fantasy, intricate ink details, dramatic compositions",
+    }
+
+    async def generate_panel(self, prompt: str, style: str = "american") -> Optional[str]:
         """
         Generates a comic panel image from a prompt and art style.
         Returns the image as a base64-encoded JPEG string, or None on failure.
@@ -24,9 +32,11 @@ class ImageGenerator:
         Runs the synchronous Imagen SDK call in a thread executor so it
         doesn't block the FastAPI event loop.
         """
+        style_key = style.lower().replace(" ", "_")
+        style_descriptor = self.STYLE_PROMPTS.get(style_key, self.STYLE_PROMPTS["american"])
         enhanced_prompt = (
-            f"Comic book panel, {style} art style, {prompt}. "
-            "High quality, detailed, professional artwork, clean line art."
+            f"Comic book panel, {style_descriptor}, {prompt}. "
+            "High quality, detailed, professional artwork."
         )
         logger.info(f"Generating panel | style={style} | prompt={enhanced_prompt}")
 
@@ -46,8 +56,11 @@ class ImageGenerator:
             )
 
             if response.generated_images:
-                image_bytes = response.generated_images[0].image.image_bytes
-                return base64.b64encode(image_bytes).decode("utf-8")
+                img = response.generated_images[0].image
+                if img is None or img.image_bytes is None:
+                    logger.warning("Imagen returned image with no bytes.")
+                    return None
+                return base64.b64encode(img.image_bytes).decode("utf-8")
 
             logger.warning("Imagen returned no images.")
             return None
