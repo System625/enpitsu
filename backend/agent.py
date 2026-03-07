@@ -22,17 +22,17 @@ COMIC_TOOLS = [
                     "Call this whenever you want to render a scene as a comic panel."
                 ),
                 parameters=types.Schema(
-                    type="OBJECT",
+                    type=types.Type.OBJECT,
                     properties={
                         "visual_description": types.Schema(
-                            type="STRING",
+                            type=types.Type.STRING,
                             description=(
                                 "Detailed visual description of the panel: setting, characters, "
                                 "action, lighting, composition, camera angle."
                             ),
                         ),
                         "caption": types.Schema(
-                            type="STRING",
+                            type=types.Type.STRING,
                             description=(
                                 "The comic book speech bubble text, internal monologue, or dramatic "
                                 "narration for this panel. Max 12 words. Authentic comic voice."
@@ -49,18 +49,18 @@ COMIC_TOOLS = [
                     "Use when the user asks to change something about a panel that was already created."
                 ),
                 parameters=types.Schema(
-                    type="OBJECT",
+                    type=types.Type.OBJECT,
                     properties={
                         "panel_number": types.Schema(
-                            type="INTEGER",
+                            type=types.Type.INTEGER,
                             description="The 1-based panel number to edit.",
                         ),
                         "new_description": types.Schema(
-                            type="STRING",
+                            type=types.Type.STRING,
                             description="Updated visual description for the panel.",
                         ),
                         "new_caption": types.Schema(
-                            type="STRING",
+                            type=types.Type.STRING,
                             description="Updated caption/dialogue for the panel. Max 12 words.",
                         ),
                     },

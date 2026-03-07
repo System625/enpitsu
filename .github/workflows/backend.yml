@@ -12,14 +12,13 @@ on:
       - "backend/**"
       - ".github/workflows/backend.yml"
 
-defaults:
-  run:
-    working-directory: backend
-
 jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +41,9 @@ jobs:
   typecheck:
     name: Type-check (pyright)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +66,9 @@ jobs:
   security:
     name: Vulnerability scan (pip-audit)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4

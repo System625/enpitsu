@@ -195,7 +195,7 @@ def _firestore_timestamp():
     try:
         from firebase_admin import firestore
 
-        return firestore.SERVER_TIMESTAMP
+        return firestore.SERVER_TIMESTAMP  # type: ignore[attr-defined]
     except Exception:
         return None
 

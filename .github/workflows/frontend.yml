@@ -12,14 +12,13 @@ on:
       - "frontend/**"
       - ".github/workflows/frontend.yml"
 
-defaults:
-  run:
-    working-directory: frontend
-
 jobs:
   lint:
     name: Lint (eslint)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +38,9 @@ jobs:
   typecheck:
     name: Type-check (tsc)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +60,9 @@ jobs:
   build:
     name: Build (next build)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +91,9 @@ jobs:
   security:
     name: Vulnerability scan (npm audit)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
