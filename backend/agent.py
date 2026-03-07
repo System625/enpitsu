@@ -7,7 +7,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Vertex AI Live API model (confirmed working with ADC)
+# Vertex AI Live API model (works with VERTEX_EXPRESS_API_KEY)
 LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
 
 
@@ -50,6 +50,7 @@ class GeminiAgent:
         """
         Opens a Gemini Multimodal Live API session and streams all
         incoming messages (text + audio) to the on_message callback.
+        Automatically reconnects when the session ends after a turn.
         """
         config = types.LiveConnectConfig(
             system_instruction=system_instruction,
@@ -59,23 +60,34 @@ class GeminiAgent:
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
                 )
             ),
+            # Transcribe the agent's audio output so we can extract GENERATE_PANEL tokens
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Transcribe the user's mic input so we can log/debug what was heard
+            input_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
-        try:
-            async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
-                self.session = session
-                self._ready.set()
-                logger.info(f"Connected to Gemini Live API: {self.model_id}")
+        self._stop = False
 
-                async for message in session.receive():
-                    await on_message(message)
+        while not self._stop:
+            try:
+                async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
+                    self.session = session
+                    self._ready.set()
+                    logger.info(f"Connected to Gemini Live API: {self.model_id}")
 
-        except Exception as e:
-            logger.error(f"Gemini Live session error: {e}")
-            raise
-        finally:
-            self.session = None
+                    async for message in session.receive():
+                        await on_message(message)
+
+                    logger.info("Gemini session ended (turn complete). Reconnecting...")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Gemini Live session error: {e}")
+                break
+            finally:
+                self.session = None
+                self._ready.clear()
 
     async def send_text(self, text: str):
         """Sends a text turn to the agent. Waits until the session is ready."""
@@ -96,6 +108,14 @@ class GeminiAgent:
             await self.session.send_realtime_input(
                 audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
             )
+
+    async def send_audio_end(self):
+        """
+        Signals end of user's audio turn so Gemini knows to start responding.
+        """
+        await asyncio.wait_for(self._ready.wait(), timeout=15)
+        if self.session:
+            await self.session.send_realtime_input(activity_end=types.ActivityEnd())
 
     def get_system_instruction(self, story_text: str) -> str:
         """Constructs the Creative Director system prompt with the story injected."""

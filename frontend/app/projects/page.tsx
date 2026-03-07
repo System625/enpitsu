@@ -1,14 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Project, loadProjects } from "@/app/hooks/useProjects";
 import { ProjectCard } from "@/components/ProjectCard";
+import { useAuth } from "@/app/hooks/useAuth";
 
 export default function ProjectsPage() {
   const router = useRouter();
-  const [projects, setProjects] = useState<Project[]>(loadProjects());
+  const { user } = useAuth();
+  const [projects, setProjects] = useState<Project[]>([]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadProjects(user.uid).then(setProjects).catch(console.error);
+  }, [user]);
 
   const handleOpen = (id: string) => {
     router.push(`/?project=${id}`);

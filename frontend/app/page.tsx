@@ -1,12 +1,12 @@
 import { Suspense } from "react";
 import { AgentControlCenter } from "@/components/AgentControlCenter";
 import { ComicCanvas } from "@/components/ComicCanvas";
-import { LiveAgentProvider } from "@/app/hooks/useLiveAgent";
 import { ProjectLoader } from "@/components/ProjectLoader";
+import { AuthGuard } from "@/components/AuthGuard";
 
 export default function Home() {
   return (
-    <LiveAgentProvider>
+    <AuthGuard>
       <Suspense>
         <ProjectLoader />
       </Suspense>
@@ -14,6 +14,6 @@ export default function Home() {
         <AgentControlCenter />
         <ComicCanvas />
       </div>
-    </LiveAgentProvider>
+    </AuthGuard>
   );
 }

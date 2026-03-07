@@ -35,6 +35,44 @@ export function ComicPanel({ panel }: ComicPanelProps) {
     }
   };
 
+  // Full loading skeleton — backend hasn't generated the image yet
+  if (panel.loading) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ type: "spring", stiffness: 260, damping: 20 }}
+        className="relative w-full h-full rounded-xl overflow-hidden border-2 border-skeuo-primary/40 shadow-neo bg-skeuo-base"
+      >
+        {/* Animated ink-wash shimmer */}
+        <div className="absolute inset-0 bg-gradient-to-br from-skeuo-surface via-skeuo-base to-skeuo-surface animate-pulse" />
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-4">
+          {/* Ink drop animation */}
+          <div className="relative flex items-center justify-center w-16 h-16">
+            <div className="absolute w-16 h-16 rounded-full border-2 border-skeuo-primary/30 animate-ping" />
+            <div className="w-8 h-8 rounded-full bg-skeuo-primary/20 flex items-center justify-center">
+              <svg className="w-5 h-5 text-skeuo-primary animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+            </div>
+          </div>
+          <p className="text-xs font-bold text-skeuo-primary/80 tracking-widest uppercase animate-pulse">
+            Drawing...
+          </p>
+          {/* Show the caption preview while waiting */}
+          {panel.text && (
+            <p className="text-[11px] text-skeuo-text-muted text-center italic max-w-[80%] leading-snug line-clamp-2">
+              &ldquo;{panel.text}&rdquo;
+            </p>
+          )}
+        </div>
+        {/* Halftone overlay */}
+        <div className="absolute inset-0 opacity-5 pointer-events-none bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiAvPgo8Y2lyY2xlIGN4PSI0IiBjeT0iNCIgcj0iMyIgZmlsbD0iIzAwMCIgLz4KPC9zdmc+')] bg-repeat" />
+      </motion.div>
+    );
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.9, y: 20 }}
@@ -42,7 +80,7 @@ export function ComicPanel({ panel }: ComicPanelProps) {
       transition={{ type: "spring", stiffness: 260, damping: 20, mass: 1 }}
       className="relative w-full h-full bg-skeuo-surface rounded-xl overflow-hidden border-2 border-skeuo-text shadow-neo group"
     >
-      {/* Generating shimmer */}
+      {/* Generating shimmer — image URL exists but hasn't loaded yet */}
       {!loaded && !errored && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-skeuo-base">
           <div className="flex gap-1.5">
@@ -50,7 +88,7 @@ export function ComicPanel({ panel }: ComicPanelProps) {
             <div className="w-2 h-2 rounded-full bg-skeuo-primary-light animate-bounce [animation-delay:150ms]" />
             <div className="w-2 h-2 rounded-full bg-skeuo-primary animate-bounce [animation-delay:300ms]" />
           </div>
-          <p className="text-xs text-skeuo-text-muted font-medium">Generating...</p>
+          <p className="text-xs text-skeuo-text-muted font-medium">Loading...</p>
         </div>
       )}
 

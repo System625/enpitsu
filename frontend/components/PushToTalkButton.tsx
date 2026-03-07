@@ -6,76 +6,81 @@ import { Icon } from "@iconify/react";
 import { motion } from "framer-motion";
 
 export function PushToTalkButton() {
-  const { isRecording, startRecording, stopRecording, agentState, interruptAgent } = useLiveAgent();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const recognitionRef = useRef<any>(null);
-  const transcriptRef = useRef<string>("");
+  const { isRecording, startRecording, stopRecording, agentState, interruptAgent, sendAudioChunk, setAudioAnalyser } = useLiveAgent();
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const [liveText, setLiveText] = useState("");
 
   const isInterruptable = agentState === "speaking" || agentState === "thinking";
 
-  const handlePressStart = () => {
+  const handlePressStart = async () => {
     if (isInterruptable) {
       interruptAgent();
       return;
     }
 
-    transcriptRef.current = "";
     setLiveText("");
     startRecording();
 
-    const SR =
-      typeof window !== "undefined" &&
-      ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition); // eslint-disable-line @typescript-eslint/no-explicit-any
+    try {
+      console.debug("[mic] Requesting microphone access...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 }, video: false });
+      console.debug("[mic] Microphone access granted");
+      streamRef.current = stream;
 
-    if (!SR) {
-      return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+      // Request 16kHz so the worklet output is already at the right rate for Gemini
+      const ctx = new AudioCtx({ sampleRate: 16000 });
+      audioCtxRef.current = ctx;
+
+      await ctx.audioWorklet.addModule("/pcm-processor.js");
+      const workletNode = new AudioWorkletNode(ctx, "pcm-processor");
+      workletNodeRef.current = workletNode;
+
+      workletNode.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+        sendAudioChunk(e.data);
+      };
+
+      const source = ctx.createMediaStreamSource(stream);
+      sourceRef.current = source;
+
+      // Create analyser for mic input visualization
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      analyser.connect(workletNode);
+      setAudioAnalyser(analyser);
+      // Don't connect worklet to destination — we only want to capture, not play back
+    } catch (err) {
+      console.error("[mic] Failed to start recording:", err);
+      stopRecording(undefined);
+      setLiveText("Mic unavailable");
+      setTimeout(() => setLiveText(""), 2000);
     }
-
-    const recognition = new SR();
-    recognition.lang = "en-US";
-    recognition.interimResults = true;
-    recognition.continuous = true;
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onresult = (e: any) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) {
-          transcriptRef.current += t + " ";
-        } else {
-          interim += t;
-        }
-      }
-      setLiveText((transcriptRef.current + interim).trim());
-    };
-
-    recognition.onend = () => {
-      const spokenText = transcriptRef.current.trim();
-      setLiveText("");
-      stopRecording(spokenText || undefined);
-    };
-
-    recognition.onerror = () => {
-      setLiveText("");
-      stopRecording(transcriptRef.current.trim() || undefined);
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
   };
 
   const handlePressEnd = () => {
     if (!isRecording) return;
 
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
-    } else {
-      setLiveText("");
-      stopRecording(undefined);
-    }
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
+
+    workletNodeRef.current?.disconnect();
+    workletNodeRef.current?.port.close();
+    workletNodeRef.current = null;
+
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    setAudioAnalyser(null);
+
+    setLiveText("");
+    stopRecording(undefined);
   };
 
   return (
@@ -108,14 +113,10 @@ export function PushToTalkButton() {
         />
       </motion.button>
 
-      {/* Live transcript preview */}
-      {isRecording && liveText && (
-        <p className="mt-3 text-xs text-skeuo-text-muted text-center italic max-w-[200px] leading-snug line-clamp-3">
-          &ldquo;{liveText}&rdquo;
+      {isRecording && (
+        <p className="mt-3 text-xs text-skeuo-text-muted text-center animate-pulse">
+          {liveText || "Listening\u2026"}
         </p>
-      )}
-      {isRecording && !liveText && (
-        <p className="mt-3 text-xs text-skeuo-text-muted text-center animate-pulse">Listening&hellip;</p>
       )}
     </div>
   );
