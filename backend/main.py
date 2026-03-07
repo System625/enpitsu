@@ -4,9 +4,10 @@ import asyncio
 import json
 import logging
 import base64
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
+import os
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict
+from typing import Dict, Optional
 from dotenv import load_dotenv
 
 from processor import StoryProcessor
@@ -25,29 +26,123 @@ app = FastAPI(title="Enpitsu Backend")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust in production
+    allow_origins=["*"],  # Tighten to Firebase Hosting domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory session storage (use Redis/DB for production)
+# ---------------------------------------------------------------------------
+# Firebase Admin SDK — initialised once at startup if credentials are available
+# ---------------------------------------------------------------------------
+_firebase_initialized = False
+_db = None  # Firestore client (None if Firebase not configured)
+
+def _init_firebase():
+    global _firebase_initialized, _db
+    if _firebase_initialized:
+        return
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore as fs
+        if not firebase_admin._apps:
+            cred = credentials.ApplicationDefault()
+            firebase_admin.initialize_app(cred)
+        _db = fs.client()
+        _firebase_initialized = True
+        logger.info("Firebase Admin SDK initialized (Firestore enabled)")
+    except Exception as e:
+        logger.warning(f"Firebase Admin SDK not available — persistence disabled: {e}")
+        _firebase_initialized = True  # don't retry
+
+_init_firebase()
+
+# ---------------------------------------------------------------------------
+# Firebase Auth token verification helper
+# ---------------------------------------------------------------------------
+async def verify_firebase_token(token: str) -> Optional[dict]:
+    """
+    Verifies a Firebase ID token. Returns decoded token claims or None on failure.
+    If Firebase is not configured, returns a guest identity so the app still works locally.
+    """
+    if not token:
+        return None
+    try:
+        from firebase_admin import auth
+        decoded = auth.verify_id_token(token)
+        return decoded
+    except Exception as e:
+        logger.warning(f"Token verification failed: {e}")
+        return None
+
+
+def _extract_bearer(authorization: str) -> str:
+    return authorization.replace("Bearer ", "").replace("bearer ", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Firestore helpers
+# ---------------------------------------------------------------------------
+def _save_panel_to_firestore(uid: str, project_id: str, panel_number: int, data: dict):
+    """Persist a generated panel to Firestore (non-blocking best-effort)."""
+    if _db is None:
+        return
+    try:
+        _db.collection("users").document(uid) \
+            .collection("projects").document(project_id) \
+            .collection("panels").document(str(panel_number)) \
+            .set(data)
+    except Exception as e:
+        logger.warning(f"Firestore panel save failed: {e}")
+
+
+def _save_session_meta_to_firestore(uid: str, project_id: str, data: dict):
+    """Persist session metadata (story title, scene count, style) to Firestore."""
+    if _db is None:
+        return
+    try:
+        _db.collection("users").document(uid) \
+            .collection("projects").document(project_id) \
+            .set(data, merge=True)
+    except Exception as e:
+        logger.warning(f"Firestore session meta save failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# In-memory session storage (backed by Firestore when available)
+# ---------------------------------------------------------------------------
 sessions: Dict[str, Dict] = {}
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {"message": "Enpitsu Backend is running"}
 
 
 @app.post("/upload")
-async def upload_story(file: UploadFile = File(...)):
+async def upload_story(
+    file: UploadFile = File(...),
+    authorization: str = Header(default=""),
+):
     """
-    Accepts PDF/Word file uploads, extracts text, and initializes a session.
+    Accepts PDF/DOCX uploads, extracts text, initialises a session.
+    Authorization header (Bearer <firebase_idToken>) is optional but
+    enables Firestore persistence when provided.
     """
     filename = file.filename or ""
     if not filename.lower().endswith(('.pdf', '.docx')):
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+
+    # Verify token if provided (non-blocking — guests still work)
+    uid = "anonymous"
+    if authorization:
+        token = _extract_bearer(authorization)
+        decoded = await verify_firebase_token(token)
+        if decoded:
+            uid = decoded["uid"]
 
     content = await file.read()
     text = await StoryProcessor.extract_text(content, filename)
@@ -64,11 +159,21 @@ async def upload_story(file: UploadFile = File(...)):
         "story_text": text,
         "scenes": scenes,
         "current_scene_index": 0,
-        "current_style": "American",
+        "current_style": "american",
         "panels": [],
+        "uid": uid,
+        "project_id": session_id,
     }
 
-    logger.info(f"Session created: {session_id} for file: {filename}. Extracted {len(scenes)} scenes.")
+    # Persist session metadata to Firestore
+    _save_session_meta_to_firestore(uid, session_id, {
+        "filename": filename,
+        "scene_count": len(scenes),
+        "style": "american",
+        "created_at": _firestore_timestamp(),
+    })
+
+    logger.info(f"Session created: {session_id} | file: {filename} | uid: {uid} | scenes: {len(scenes)}")
 
     return {
         "session_id": session_id,
@@ -77,9 +182,18 @@ async def upload_story(file: UploadFile = File(...)):
     }
 
 
+def _firestore_timestamp():
+    """Returns a server timestamp sentinel if Firestore is available, else None."""
+    try:
+        from firebase_admin import firestore
+        return firestore.SERVER_TIMESTAMP
+    except Exception:
+        return None
+
+
 @app.get("/session/{session_id}")
 async def get_session(session_id: str):
-    """Returns current session state (panels generated so far, scene count, etc.)."""
+    """Returns current session state."""
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found.")
     session = sessions[session_id]
@@ -102,29 +216,46 @@ async def get_panels(session_id: str):
     return {"panels": sessions[session_id]["panels"]}
 
 
+# ---------------------------------------------------------------------------
+# WebSocket — real-time agent streaming
+# ---------------------------------------------------------------------------
 @app.websocket("/ws/session/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str = ""):
     """
     WebSocket endpoint for real-time bidirectional streaming with the Gemini agent.
 
     Incoming message types (from frontend):
       - { "type": "user_message", "text": "..." }
-      - { "type": "style_update", "style": "Manga|Manhwa|Western" }
-      - binary bytes: raw PCM audio chunks from the user's microphone
+      - { "type": "style_update", "style": "manga|american|..." }
+      - { "type": "audio_turn_complete" }
+      - binary bytes: raw PCM audio chunks (16-bit signed, 16kHz, mono)
 
     Outgoing message types (to frontend):
       - { "type": "agent_response", "text": "...", "status": "speaking" }
-      - { "type": "agent_audio", "audio": "<base64 PCM>" }
+      - { "type": "agent_audio", "audio": "<base64 PCM>", "mime_type": "..." }
       - { "type": "status_update", "status": "generating|thinking|idle", "text": "..." }
-      - { "type": "panel_generated", "image": "<base64 JPEG>", "prompt": "...", "text": "..." }
+      - { "type": "panel_loading", "panel_number": N, "caption": "..." }
+      - { "type": "panel_generated", "image": "<base64 JPEG>", "prompt": "...", "text": "...", "panel_number": N }
+      - { "type": "panel_updated", "image": "<base64 JPEG>", "panel_number": N, "text": "..." }
+      - { "type": "ping" }
       - { "type": "error", "message": "..." }
     """
     if session_id not in sessions:
         await websocket.close(code=4004)
         return
 
+    # Verify token from query param if provided
+    uid = "anonymous"
+    if token:
+        decoded = await verify_firebase_token(token)
+        if decoded:
+            uid = decoded["uid"]
+            logger.info(f"Authenticated WebSocket | uid={uid} | session={session_id}")
+        else:
+            logger.warning(f"Invalid token on WebSocket connect | session={session_id}")
+
     await websocket.accept()
-    logger.info(f"WebSocket connection accepted for session: {session_id}")
+    logger.info(f"WebSocket accepted | session={session_id} | uid={uid}")
 
     session_data = sessions[session_id]
 
@@ -137,85 +268,171 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=1011)
         return
 
-    # Accumulate transcription chunks across a full agent turn
-    transcription_buffer = []
+    # -------------------------------------------------------------------
+    # Transcription buffer — accumulate chunks until turn_complete
+    # -------------------------------------------------------------------
+    transcription_buffer: list[str] = []
 
     async def flush_transcription():
-        """Process the accumulated transcription buffer as a complete turn."""
+        """
+        Fallback: process accumulated GENERATE_PANEL: tokens from transcription.
+        This only fires if the model doesn't use function calling (e.g. old SDK version).
+        """
         nonlocal transcription_buffer
         full_text = " ".join(transcription_buffer).strip()
         transcription_buffer = []
         if not full_text:
             return
 
-        logger.info(f"Agent transcription: {full_text}")
+        logger.info(f"Agent transcription (flush): {full_text[:200]}")
 
-        # Normalise transcription artifacts: Gemini sometimes inserts spaces inside tokens
-        # e.g. "GEN ERATE_PANEL:" or "GENERATE_ PANEL:" → "GENERATE_PANEL:"
-        normalised_text = re.sub(r'GEN\s*ERATE\s*_\s*PANEL\s*:', 'GENERATE_PANEL:', full_text, flags=re.IGNORECASE)
-        normalised_text = re.sub(r'CAP\s*TION\s*:', 'CAPTION:', normalised_text, flags=re.IGNORECASE)
-        full_text = normalised_text
+        # Normalise any garbled token
+        normalised = re.sub(r'GEN\s*ERATE\s*_\s*PANEL\s*:', 'GENERATE_PANEL:', full_text, flags=re.IGNORECASE)
+        normalised = re.sub(r'CAP\s*TION\s*:', 'CAPTION:', normalised, flags=re.IGNORECASE)
 
-        if "GENERATE_PANEL:" in full_text:
-            # Split on every GENERATE_PANEL: token to support multiple panels per turn
-            # Format: [narrative_text, prompt1, narrative_text2, prompt2, ...]
-            parts = full_text.split("GENERATE_PANEL:")
-            intro_text = parts[0].strip()
-            if intro_text:
-                await websocket.send_json({"type": "agent_response", "text": intro_text, "status": "speaking"})
-
-            base_panel_number = len(session_data["panels"]) + 1
-            panel_specs = []
-            for i, panel_part in enumerate(parts[1:]):
-                raw = panel_part.strip().replace("\n", " ").strip()
-                if "CAPTION:" in raw:
-                    caption_split = raw.split("CAPTION:", 1)
-                    prompt = caption_split[0].strip()
-                    caption = caption_split[1].strip()
-                else:
-                    prompt = raw
-                    caption = f"Panel {base_panel_number + i}"
-                panel_specs.append((base_panel_number + i, prompt, caption))
-
-            # Send all skeletons immediately so the canvas fills up at once
-            for panel_number, prompt, caption in panel_specs:
-                await websocket.send_json({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
-            await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Drawing {len(panel_specs)} panel(s)..."})
-
-            # Generate all panels concurrently — images pop in as they finish
-            async def generate_and_send(panel_number: int, prompt: str, caption: str):
-                style = session_data.get("current_style", "american")
-                image_b64 = await image_gen.generate_panel(prompt, style=style)
-                if image_b64:
-                    session_data["panels"].append({"prompt": prompt, "image": image_b64, "style": style, "scene_index": session_data["current_scene_index"]})
-                    await websocket.send_json({"type": "panel_generated", "image": image_b64, "prompt": prompt, "text": caption, "panel_number": panel_number})
-                else:
-                    await websocket.send_json({"type": "agent_response", "text": f"Panel {panel_number} hit a snag — ask me to retry it.", "status": "idle"})
-
-            await asyncio.gather(*[generate_and_send(n, p, c) for n, p, c in panel_specs])
+        if "GENERATE_PANEL:" not in normalised:
+            await websocket.send_json({"type": "agent_response", "text": normalised, "status": "speaking"})
             await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
-        else:
-            await websocket.send_json({"type": "agent_response", "text": full_text, "status": "speaking"})
-            await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+            return
 
+        parts = normalised.split("GENERATE_PANEL:")
+        intro = parts[0].strip()
+        if intro:
+            await websocket.send_json({"type": "agent_response", "text": intro, "status": "speaking"})
+
+        base_number = len(session_data["panels"]) + 1
+        panel_specs = []
+        for i, part in enumerate(parts[1:]):
+            raw = part.strip().replace("\n", " ")
+            if "CAPTION:" in raw:
+                prompt, caption = raw.split("CAPTION:", 1)
+                prompt, caption = prompt.strip(), caption.strip()
+            else:
+                prompt, caption = raw, f"Panel {base_number + i}"
+            panel_specs.append((base_number + i, prompt, caption))
+
+        for panel_number, _, caption in panel_specs:
+            await websocket.send_json({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
+        await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Drawing {len(panel_specs)} panel(s)..."})
+
+        async def _gen(panel_number: int, prompt: str, caption: str):
+            style = session_data.get("current_style", "american")
+            image_b64 = await image_gen.generate_panel(prompt, style=style)
+            if image_b64:
+                session_data["panels"].append({
+                    "panel_number": panel_number, "prompt": prompt,
+                    "image": image_b64, "caption": caption,
+                    "style": style, "scene_index": session_data["current_scene_index"],
+                })
+                _save_panel_to_firestore(session_data["uid"], session_data["project_id"], panel_number, {
+                    "prompt": prompt, "caption": caption, "style": style,
+                    "panel_number": panel_number, "created_at": _firestore_timestamp(),
+                })
+                await websocket.send_json({
+                    "type": "panel_generated", "image": image_b64,
+                    "prompt": prompt, "text": caption, "panel_number": panel_number,
+                })
+            else:
+                await websocket.send_json({"type": "agent_response", "text": f"Panel {panel_number} failed — ask me to retry.", "status": "idle"})
+
+        await asyncio.gather(*[_gen(n, p, c) for n, p, c in panel_specs])
+        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+
+    # -------------------------------------------------------------------
+    # on_agent_message — handles all messages from Gemini Live API
+    # -------------------------------------------------------------------
     async def on_agent_message(message):
-        """Callback: handles LiveServerMessage from Gemini and forwards to frontend."""
         try:
+            # --- Tool calls (structured function calling) ---
+            tool_call = getattr(message, 'tool_call', None)
+            if tool_call and tool_call.function_calls:
+                for fc in tool_call.function_calls:
+                    logger.info(f"Tool call: {fc.name} | args={fc.args}")
+
+                    if fc.name == "generate_comic_panel":
+                        prompt = (fc.args or {}).get("visual_description", "")
+                        caption = (fc.args or {}).get("caption", "")
+                        panel_number = len(session_data["panels"]) + 1
+                        style = session_data.get("current_style", "american")
+
+                        await websocket.send_json({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
+                        await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Drawing panel {panel_number}..."})
+
+                        image_b64 = await image_gen.generate_panel(prompt, style=style)
+                        if image_b64:
+                            session_data["panels"].append({
+                                "panel_number": panel_number, "prompt": prompt,
+                                "image": image_b64, "caption": caption,
+                                "style": style, "scene_index": session_data["current_scene_index"],
+                            })
+                            _save_panel_to_firestore(session_data["uid"], session_data["project_id"], panel_number, {
+                                "prompt": prompt, "caption": caption, "style": style,
+                                "panel_number": panel_number, "created_at": _firestore_timestamp(),
+                            })
+                            await websocket.send_json({
+                                "type": "panel_generated", "image": image_b64,
+                                "prompt": prompt, "text": caption, "panel_number": panel_number,
+                            })
+                            await agent.send_tool_response(fc.id or "", fc.name, {
+                                "status": "success", "panel_number": panel_number,
+                            })
+                        else:
+                            await websocket.send_json({"type": "agent_response", "text": f"Panel {panel_number} generation failed.", "status": "idle"})
+                            await agent.send_tool_response(fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"})
+
+                        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+
+                    elif fc.name == "edit_existing_panel":
+                        panel_number = int((fc.args or {}).get("panel_number", 0))
+                        new_description = (fc.args or {}).get("new_description", "")
+                        new_caption = (fc.args or {}).get("new_caption", "")
+                        style = session_data.get("current_style", "american")
+
+                        await websocket.send_json({"type": "status_update", "status": "generating", "text": f"Redrawing panel {panel_number}..."})
+
+                        image_b64 = await image_gen.generate_panel(new_description, style=style)
+                        if image_b64:
+                            # Update in session memory
+                            for p in session_data["panels"]:
+                                if p.get("panel_number") == panel_number:
+                                    p["image"] = image_b64
+                                    p["prompt"] = new_description
+                                    p["caption"] = new_caption
+                            _save_panel_to_firestore(session_data["uid"], session_data["project_id"], panel_number, {
+                                "prompt": new_description, "caption": new_caption, "style": style,
+                                "panel_number": panel_number, "updated_at": _firestore_timestamp(),
+                            })
+                            await websocket.send_json({
+                                "type": "panel_updated", "panel_number": panel_number,
+                                "image": image_b64, "text": new_caption, "prompt": new_description,
+                            })
+                            await agent.send_tool_response(fc.id or "", fc.name, {
+                                "status": "success", "panel_number": panel_number,
+                            })
+                        else:
+                            await websocket.send_json({"type": "agent_response", "text": f"Couldn't redraw panel {panel_number}.", "status": "idle"})
+                            await agent.send_tool_response(fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"})
+
+                        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+
+                return  # tool call handled — don't process server_content below
+
+            # --- server_content: audio + transcription ---
             sc = getattr(message, 'server_content', None)
             if not sc:
                 return
 
-            # Log what the user said (input transcription) for debugging
-            input_transcription = getattr(sc, 'input_transcription', None)
-            if input_transcription and getattr(input_transcription, 'text', None):
-                logger.info(f"User said: {input_transcription.text}")
+            # Log user speech (input transcription)
+            input_tr = getattr(sc, 'input_transcription', None)
+            if input_tr and getattr(input_tr, 'text', None):
+                logger.info(f"User said: {input_tr.text}")
 
-            # Accumulate agent's output transcription (contains GENERATE_PANEL tokens)
-            output_transcription = getattr(sc, 'output_transcription', None)
-            if output_transcription and getattr(output_transcription, 'text', None):
-                transcription_buffer.append(output_transcription.text)
+            # Accumulate agent output transcription (fallback GENERATE_PANEL path)
+            output_tr = getattr(sc, 'output_transcription', None)
+            if output_tr and getattr(output_tr, 'text', None):
+                transcription_buffer.append(output_tr.text)
 
-            # Forward raw audio chunks to the frontend
+            # Forward audio chunks to frontend
             model_turn = getattr(sc, 'model_turn', None)
             if model_turn:
                 for part in getattr(model_turn, 'parts', []):
@@ -228,69 +445,84 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "mime_type": getattr(inline_data, 'mime_type', 'audio/pcm;rate=24000'),
                         })
 
-            # turn_complete fires when Gemini finishes its response — flush then
+            # Flush transcription buffer when Gemini signals turn complete
             turn_done = getattr(sc, 'turn_complete', False) or getattr(message, 'turn_complete', False)
             if turn_done:
                 await flush_transcription()
 
         except Exception as e:
-            logger.error(f"Error forwarding agent message: {e}")
+            logger.error(f"Error in on_agent_message: {e}", exc_info=True)
 
-    # Build system instruction
+    # -------------------------------------------------------------------
+    # Build system instruction and start agent
+    # -------------------------------------------------------------------
     system_instruction = agent.get_system_instruction(session_data['story_text'])
-    system_instruction += (
-        "\n\nCRITICAL PANEL GENERATION RULES:\n"
-        "- Every time you want to render a comic panel, output the exact token: GENERATE_PANEL: followed by a visual description, then CAPTION: followed by a punchy in-world line. Everything on ONE line.\n"
-        "- NEVER ask the user for style or mood preferences before generating — pick sensible defaults and generate immediately.\n"
-        "- If the user asks for multiple panels or to complete the whole story, output ALL panels in a single response, each on its own line.\n"
-        "- Format for each panel (ONE line, no internal line breaks):\n"
-        "  GENERATE_PANEL: <visual scene description> CAPTION: <punchy comic dialogue or narration max 10 words>\n"
-        "- Examples:\n"
-        "  GENERATE_PANEL: Dark rooftop at night, lone figure in a trench coat CAPTION: The city never sleeps. Neither do I.\n"
-        "  GENERATE_PANEL: Hero leaps across rooftops, city lights below CAPTION: Nowhere to run, Vasquez!\n"
-        "  GENERATE_PANEL: Villain revealed in shadowy lair CAPTION: I've been expecting you.\n"
-        "- The CAPTION must be authentic comic book text — character dialogue, internal monologue, or dramatic narration. Never describe the image.\n"
-        "- If the user asks for the next panel, generate it immediately without asking questions.\n"
-    )
 
-    # Start Gemini live session in background
     agent_task = asyncio.create_task(agent.connect(system_instruction, on_agent_message))
 
-    # Send initial status so frontend knows we're ready
+    # -------------------------------------------------------------------
+    # Heartbeat — keeps the WebSocket alive during long operations
+    # -------------------------------------------------------------------
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await websocket.send_json({"type": "ping"})
+            except Exception:
+                break
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+
     await websocket.send_json({"type": "status_update", "status": "idle", "text": "Agent ready."})
 
+    # -------------------------------------------------------------------
+    # Main receive loop
+    # -------------------------------------------------------------------
     try:
         while True:
             message = await websocket.receive()
 
             if "text" in message:
-                data = json.loads(message["text"])
+                try:
+                    data = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    continue
+
                 msg_type = data.get("type")
-                logger.info(f"Received [{msg_type}] from session {session_id}")
+                logger.info(f"Received [{msg_type}] | session={session_id}")
 
                 if msg_type == "user_message":
-                    # Flush any buffered transcription from the previous turn before sending new input
                     await flush_transcription()
                     await agent.send_text(data.get("text", ""))
 
                 elif msg_type == "audio_turn_complete":
-                    # Frontend stopped the mic — tell Gemini to start responding
-                    await agent.send_audio_end()
+                    logger.info("Audio turn complete — calling send_audio_end()")
+                    try:
+                        await agent.send_audio_end()
+                    except Exception as e:
+                        logger.error(f"send_audio_end failed: {e}")
 
                 elif msg_type == "style_update":
-                    new_style = data.get("style", "Manga")
+                    new_style = data.get("style", "american")
                     session_data["current_style"] = new_style
-                    await agent.send_text(f"The user has selected a new art style: {new_style}. Acknowledge and continue.")
+                    logger.info(f"Style updated to: {new_style}")
+                    await agent.send_text(f"The user changed the art style to: {new_style}. Acknowledge briefly and continue.")
 
             elif "bytes" in message:
-                await agent.send_audio(message["bytes"])
+                audio_bytes = message["bytes"]
+                logger.debug(f"Received audio chunk: {len(audio_bytes)} bytes")
+                try:
+                    await agent.send_audio(audio_bytes)
+                except Exception as e:
+                    logger.error(f"send_audio failed: {e}")
 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected from session: {session_id}")
+        logger.info(f"Client disconnected | session={session_id}")
     except Exception as e:
-        logger.error(f"WebSocket error in session {session_id}: {e}")
+        logger.error(f"WebSocket error | session={session_id}: {e}", exc_info=True)
     finally:
         agent_task.cancel()
+        heartbeat_task.cancel()
         try:
             await websocket.close()
         except Exception:
