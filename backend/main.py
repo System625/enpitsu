@@ -45,11 +45,12 @@ async def upload_story(file: UploadFile = File(...)):
     """
     Accepts PDF/Word file uploads, extracts text, and initializes a session.
     """
-    if not file.filename.lower().endswith(('.pdf', '.docx')):
+    filename = file.filename or ""
+    if not filename.lower().endswith(('.pdf', '.docx')):
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
 
     content = await file.read()
-    text = await StoryProcessor.extract_text(content, file.filename)
+    text = await StoryProcessor.extract_text(content, filename)
 
     if not text:
         raise HTTPException(status_code=400, detail="Could not extract text from file.")
@@ -58,7 +59,7 @@ async def upload_story(file: UploadFile = File(...)):
     scenes = StoryProcessor.break_into_scenes(text)
 
     sessions[session_id] = {
-        "filename": file.filename,
+        "filename": filename,
         "status": "uploaded",
         "story_text": text,
         "scenes": scenes,
@@ -67,11 +68,11 @@ async def upload_story(file: UploadFile = File(...)):
         "panels": [],
     }
 
-    logger.info(f"Session created: {session_id} for file: {file.filename}. Extracted {len(scenes)} scenes.")
+    logger.info(f"Session created: {session_id} for file: {filename}. Extracted {len(scenes)} scenes.")
 
     return {
         "session_id": session_id,
-        "filename": file.filename,
+        "filename": filename,
         "scene_count": len(scenes),
     }
 

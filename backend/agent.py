@@ -54,7 +54,7 @@ class GeminiAgent:
         """
         config = types.LiveConnectConfig(
             system_instruction=system_instruction,
-            response_modalities=["AUDIO"],
+            response_modalities=["AUDIO"],  # type: ignore[arg-type]
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
