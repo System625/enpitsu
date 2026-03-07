@@ -2,7 +2,6 @@ import asyncio
 import logging
 import base64
 from typing import Optional
-from google import genai
 from google.genai import types
 
 from agent import make_client
