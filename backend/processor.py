@@ -1,7 +1,8 @@
 import io
 import logging
-from pypdf import PdfReader
+
 from docx import Document
+from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,7 @@ class StoryProcessor:
         try:
             if ext == "pdf":
                 reader = PdfReader(io.BytesIO(file_content))
-                text = "\n".join(
-                    page.extract_text() for page in reader.pages if page.extract_text()
-                )
+                text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
             elif ext == "docx":
                 doc = Document(io.BytesIO(file_content))
                 text = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
@@ -70,8 +69,5 @@ class StoryProcessor:
         # Last resort: fixed word-count segments (~500 words each)
         words = text.split()
         chunk_size = 500
-        scenes = [
-            " ".join(words[i: i + chunk_size])
-            for i in range(0, len(words), chunk_size)
-        ]
+        scenes = [" ".join(words[i : i + chunk_size]) for i in range(0, len(words), chunk_size)]
         return [s for s in scenes if s]

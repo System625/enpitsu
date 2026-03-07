@@ -1,7 +1,8 @@
-import os
 import asyncio
 import logging
+import os
 from typing import Callable
+
 from google import genai
 from google.genai import types
 
@@ -12,60 +13,62 @@ LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
 
 # Tool definitions for structured panel generation and editing
 COMIC_TOOLS = [
-    types.Tool(function_declarations=[
-        types.FunctionDeclaration(
-            name="generate_comic_panel",
-            description=(
-                "Generate a comic book panel image from a visual description. "
-                "Call this whenever you want to render a scene as a comic panel."
-            ),
-            parameters=types.Schema(
-                type="OBJECT",
-                properties={
-                    "visual_description": types.Schema(
-                        type="STRING",
-                        description=(
-                            "Detailed visual description of the panel: setting, characters, "
-                            "action, lighting, composition, camera angle."
+    types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="generate_comic_panel",
+                description=(
+                    "Generate a comic book panel image from a visual description. "
+                    "Call this whenever you want to render a scene as a comic panel."
+                ),
+                parameters=types.Schema(
+                    type="OBJECT",
+                    properties={
+                        "visual_description": types.Schema(
+                            type="STRING",
+                            description=(
+                                "Detailed visual description of the panel: setting, characters, "
+                                "action, lighting, composition, camera angle."
+                            ),
                         ),
-                    ),
-                    "caption": types.Schema(
-                        type="STRING",
-                        description=(
-                            "The comic book speech bubble text, internal monologue, or dramatic "
-                            "narration for this panel. Max 12 words. Authentic comic voice."
+                        "caption": types.Schema(
+                            type="STRING",
+                            description=(
+                                "The comic book speech bubble text, internal monologue, or dramatic "
+                                "narration for this panel. Max 12 words. Authentic comic voice."
+                            ),
                         ),
-                    ),
-                },
-                required=["visual_description", "caption"],
+                    },
+                    required=["visual_description", "caption"],
+                ),
             ),
-        ),
-        types.FunctionDeclaration(
-            name="edit_existing_panel",
-            description=(
-                "Regenerate an existing comic panel with new instructions. "
-                "Use when the user asks to change something about a panel that was already created."
+            types.FunctionDeclaration(
+                name="edit_existing_panel",
+                description=(
+                    "Regenerate an existing comic panel with new instructions. "
+                    "Use when the user asks to change something about a panel that was already created."
+                ),
+                parameters=types.Schema(
+                    type="OBJECT",
+                    properties={
+                        "panel_number": types.Schema(
+                            type="INTEGER",
+                            description="The 1-based panel number to edit.",
+                        ),
+                        "new_description": types.Schema(
+                            type="STRING",
+                            description="Updated visual description for the panel.",
+                        ),
+                        "new_caption": types.Schema(
+                            type="STRING",
+                            description="Updated caption/dialogue for the panel. Max 12 words.",
+                        ),
+                    },
+                    required=["panel_number", "new_description", "new_caption"],
+                ),
             ),
-            parameters=types.Schema(
-                type="OBJECT",
-                properties={
-                    "panel_number": types.Schema(
-                        type="INTEGER",
-                        description="The 1-based panel number to edit.",
-                    ),
-                    "new_description": types.Schema(
-                        type="STRING",
-                        description="Updated visual description for the panel.",
-                    ),
-                    "new_caption": types.Schema(
-                        type="STRING",
-                        description="Updated caption/dialogue for the panel. Max 12 words.",
-                    ),
-                },
-                required=["panel_number", "new_description", "new_caption"],
-            ),
-        ),
-    ])
+        ]
+    )
 ]
 
 
@@ -115,9 +118,7 @@ class GeminiAgent:
             system_instruction=system_instruction,
             response_modalities=["AUDIO"],  # type: ignore[arg-type]
             speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                )
+                voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede"))
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -164,9 +165,7 @@ class GeminiAgent:
         await asyncio.wait_for(self._ready.wait(), timeout=15)
         if self.session:
             logger.debug(f"Sending audio chunk: {len(audio_data)} bytes")
-            await self.session.send_realtime_input(
-                audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
-            )
+            await self.session.send_realtime_input(audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000"))
 
     async def send_audio_end(self):
         """

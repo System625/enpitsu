@@ -1,7 +1,8 @@
 import asyncio
-import logging
 import base64
+import logging
 from typing import Optional
+
 from google.genai import types
 
 from agent import make_client
@@ -17,11 +18,11 @@ class ImageGenerator:
 
     # Maps frontend style keys to Imagen-optimised prompt descriptors
     STYLE_PROMPTS = {
-        "american":      "American superhero comic book style, bold dynamic lines, vibrant colors, Marvel/DC aesthetic",
-        "manga":         "Japanese manga style, black and white ink, screentone shading, expressive characters",
-        "franco_belgian":"Franco-Belgian bande dessinée style, ligne claire, Tintin/Asterix aesthetic, clean outlines",
-        "manhwa":        "Korean manhwa webtoon style, high quality digital painting, full color, cinematic lighting",
-        "manhua":        "Chinese manhua style, wuxia fantasy, intricate ink details, dramatic compositions",
+        "american": "American superhero comic book style, bold dynamic lines, vibrant colors, Marvel/DC aesthetic",
+        "manga": "Japanese manga style, black and white ink, screentone shading, expressive characters",
+        "franco_belgian": "Franco-Belgian bande dessinée style, ligne claire, Tintin/Asterix aesthetic, clean outlines",
+        "manhwa": "Korean manhwa webtoon style, high quality digital painting, full color, cinematic lighting",
+        "manhua": "Chinese manhua style, wuxia fantasy, intricate ink details, dramatic compositions",
     }
 
     async def generate_panel(self, prompt: str, style: str = "american") -> Optional[str]:
@@ -35,8 +36,7 @@ class ImageGenerator:
         style_key = style.lower().replace(" ", "_")
         style_descriptor = self.STYLE_PROMPTS.get(style_key, self.STYLE_PROMPTS["american"])
         enhanced_prompt = (
-            f"Comic book panel, {style_descriptor}, {prompt}. "
-            "High quality, detailed, professional artwork."
+            f"Comic book panel, {style_descriptor}, {prompt}. High quality, detailed, professional artwork."
         )
         logger.info(f"Generating panel | style={style} | prompt={enhanced_prompt}")
 
