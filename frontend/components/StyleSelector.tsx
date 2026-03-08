@@ -13,6 +13,11 @@ const STYLES: { id: ComicStyle; label: string; icon: string }[] = [
 export function StyleSelector() {
   const { currentStyle, setCurrentStyle } = useLiveAgent();
 
+  const handleStyleClick = (styleId: ComicStyle) => {
+    // Toggle off if already selected, otherwise select
+    setCurrentStyle(currentStyle === styleId ? null : styleId);
+  };
+
   return (
     <div className="flex flex-col p-5 bg-skeuo-surface rounded-2xl shadow-neo border border-skeuo-border">
       <h3 className="text-[10px] text-skeuo-text-muted font-bold mb-4 tracking-[0.2em] uppercase">
@@ -24,7 +29,7 @@ export function StyleSelector() {
           return (
             <button
               key={style.id}
-              onClick={() => setCurrentStyle(style.id)}
+              onClick={() => handleStyleClick(style.id)}
               className={`relative flex items-center gap-3 p-3 rounded-xl text-left transition-all duration-200 font-semibold text-sm ${
                 isActive
                   ? "shadow-neo-btn-pressed bg-skeuo-base text-skeuo-primary ring-1 ring-skeuo-primary/30"

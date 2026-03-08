@@ -48,3 +48,8 @@ desktop.ini
 !tsconfig.json
 service-account-*.json
 gcp-credentials.json
+
+# Reference repos (clone locally, don't commit)
+gemini-live-api-examples/
+
+CLAUDE.md
