@@ -1,10 +1,10 @@
 import asyncio
 import logging
 import os
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 from google import genai
-from google.genai import types
+from google.genai import live, types
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class GeminiAgent:
     def __init__(self, model_id: str = LIVE_MODEL):
         self.model_id = model_id
         self.client = make_client()
-        self.session: Optional[object] = None
+        self.session: Optional[live.AsyncSession] = None
         self._ready = asyncio.Event()
         self._stop = False
         self._connect_lock = asyncio.Lock()
@@ -154,14 +154,15 @@ class GeminiAgent:
                 if self._history:
                     logger.info(f"Replaying {len(self._history)} history turns")
                     await session.send_client_content(
-                        turns=self._history,
+                        turns=cast(list[types.Content | types.ContentDict], self._history),
                         turn_complete=True,
                     )
 
                 async for message in session.receive():
                     if self._stop:
                         break
-                    await self._on_message(message)
+                    if self._on_message is not None:
+                        await self._on_message(message)
 
                 # Session ended naturally (turn_complete). Do NOT auto-reconnect.
                 # _ensure_session() will reconnect when the user sends new input.
