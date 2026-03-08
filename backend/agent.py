@@ -141,8 +141,6 @@ class GeminiAgent:
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             input_audio_transcription=types.AudioTranscriptionConfig(),
-            proactivity=types.ProactivityConfig(proactive_audio=True),  # type: ignore[attr-defined]
-            enable_affective_dialog=True,  # type: ignore[call-arg]
             tools=COMIC_TOOLS,
         )
 

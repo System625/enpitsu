@@ -296,9 +296,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
         logger.info(f"Agent transcription (flush): {full_text[:200]}")
 
-        # Record agent response in history for context replay on reconnect
-        agent.record_agent_response(full_text)
-
         # Normalise any garbled token
         normalised = re.sub(r"GEN\s*ERATE\s*_\s*PANEL\s*:", "GENERATE_PANEL:", full_text, flags=re.IGNORECASE)
         normalised = re.sub(r"CAP\s*TION\s*:", "CAPTION:", normalised, flags=re.IGNORECASE)
