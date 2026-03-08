@@ -8,6 +8,16 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:800
 
 /** Play a chunk of base64-encoded PCM audio through the Web Audio API, queued sequentially. */
 let _nextPlayTime = 0;
+let _activeSources: AudioBufferSourceNode[] = [];
+
+function clearPcmQueue(): void {
+  _nextPlayTime = 0;
+  for (const src of _activeSources) {
+    try { src.stop(); } catch { /* already stopped */ }
+  }
+  _activeSources = [];
+}
+
 function playPcmChunk(base64Data: string, mimeType: string, audioCtx: AudioContext, analyser: AnalyserNode | null): void {
   try {
     const binary = atob(base64Data);
@@ -37,6 +47,10 @@ function playPcmChunk(base64Data: string, mimeType: string, audioCtx: AudioConte
     const startAt = Math.max(audioCtx.currentTime, _nextPlayTime);
     source.start(startAt);
     _nextPlayTime = startAt + buffer.duration;
+    _activeSources.push(source);
+    source.onended = () => {
+      _activeSources = _activeSources.filter(s => s !== source);
+    };
   } catch (e) {
     console.error("PCM playback error:", e);
   }
@@ -87,39 +101,6 @@ interface LiveAgentContextType {
 const LiveAgentContext = createContext<LiveAgentContextType | null>(null);
 
 
-function speak(text: string, onEnd?: () => void): void {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.95;
-  utterance.pitch = 1.1;
-
-  const voices = window.speechSynthesis.getVoices();
-
-  // Prefer natural / premium voices — these sound far less robotic
-  const naturalKeywords = [
-    "natural", "premium", "enhanced", "neural",
-    "samantha", "karen", "daniel", "fiona", "moira",
-    "zira", "david", "mark", "hazel", "susan",
-    "google uk english female", "google us english",
-  ];
-
-  const preferred =
-    // 1. Try to find a natural/premium English voice
-    voices.find(v =>
-      v.lang.startsWith("en") &&
-      naturalKeywords.some(k => v.name.toLowerCase().includes(k))
-    ) ||
-    // 2. Any remote (cloud) English voice — usually higher quality
-    voices.find(v => v.lang.startsWith("en") && !v.localService) ||
-    // 3. Fallback to any English voice
-    voices.find(v => v.lang.startsWith("en"));
-
-  if (preferred) utterance.voice = preferred;
-  if (onEnd) utterance.onend = onEnd;
-  window.speechSynthesis.speak(utterance);
-}
-
 
 export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -142,8 +123,6 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const sessionIdRef = useRef<string | null>(null);
   // Lazy-created AudioContext for PCM playback — only created on first agent_audio message
   const audioContextRef = useRef<AudioContext | null>(null);
-  // Track whether we've actually received PCM audio in this session
-  const receivingPcmRef = useRef<boolean>(false);
   const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -199,13 +178,12 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     const ws = new WebSocket(`${wsUrl}/ws/session/${sessionId}${tokenParam}`);
     wsRef.current = ws;
     sessionIdRef.current = sessionId;
-    receivingPcmRef.current = false; // reset per session — TTS is fallback until PCM arrives
     // Close and discard any previous AudioContext so chunks don't pile up across sessions
     audioContextRef.current?.close().catch(() => {});
     audioContextRef.current = null;
     playbackAnalyserRef.current = null;
     setAudioAnalyser(null);
-    _nextPlayTime = 0;
+    clearPcmQueue();
 
     ws.onopen = () => {
       console.log("WebSocket connected for session:", sessionId);
@@ -272,21 +250,22 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (msg.type === "agent_response") {
+          // PCM audio from Gemini drives actual playback — this is just a transcript notification
           setAgentState("speaking");
-          // Use browser TTS only if we haven't received real PCM audio in this session
-          if (!receivingPcmRef.current) {
-            speak(msg.text, () => setAgentState("idle"));
-          } else {
-            // PCM audio is coming — let agent_audio chunks drive playback
-            // Reset to idle after a generous timeout in case audio ends silently
-            if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
-            speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 12000);
-          }
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+          speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 12000);
+        }
+
+        if (msg.type === "interrupted") {
+          // Gemini interrupted — clear the PCM audio queue immediately so old audio doesn't play over new response
+          clearPcmQueue();
+          window.speechSynthesis?.cancel();
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+          setAgentState("listening");
         }
 
         if (msg.type === "agent_audio") {
           setAgentState("speaking");
-          receivingPcmRef.current = true;
           if (msg.audio) {
             // Lazily create AudioContext on first audio message (avoids autoplay policy issues)
             if (!audioContextRef.current) {
@@ -423,9 +402,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     pendingUserTextRef.current = "";
 
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setAgentState("speaking");
-      speak("Please upload a story first to connect to the agent.", () => setAgentState("idle"));
-      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 5000);
+      setAgentState("idle");
       return;
     }
 
@@ -479,13 +456,12 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       setAgentState("thinking");
     } catch (err) {
       console.error("Upload error:", err);
-      setAgentState("speaking");
-      speak("I had trouble uploading that file. Please try again.", () => setAgentState("idle"));
-      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 6000);
+      setAgentState("idle");
     }
   }, [connectWebSocket, user]);
 
   const interruptAgent = useCallback(() => {
+    clearPcmQueue();
     window.speechSynthesis?.cancel();
     clearSpeakingTimer();
     setAgentState("idle");

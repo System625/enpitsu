@@ -559,6 +559,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                             }
                         )
 
+            # Forward interrupted event — frontend uses this to clear audio queue
+            if getattr(sc, "interrupted", False):
+                await websocket.send_json({"type": "interrupted"})
+                logger.info("Gemini interrupted signal forwarded to frontend")
+
             # Flush transcription buffer when Gemini signals turn complete
             turn_done = getattr(sc, "turn_complete", False) or getattr(message, "turn_complete", False)
             if turn_done:
@@ -646,8 +651,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     finally:
         agent._stop = True
         agent_task.cancel()
-        if agent._session_task:
-            agent._session_task.cancel()
         heartbeat_task.cancel()
         try:
             await websocket.close()
