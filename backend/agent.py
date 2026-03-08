@@ -8,8 +8,8 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Vertex AI Live API model
-LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
+# Gemini Live API model — 2.5 Flash native audio has better voice quality and responsiveness
+LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 # Tool definitions for structured panel generation and editing
 COMIC_TOOLS = [
@@ -140,6 +140,8 @@ class GeminiAgent:
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             input_audio_transcription=types.AudioTranscriptionConfig(),
+            proactivity=types.ProactivityConfig(proactive_audio=True),  # type: ignore[attr-defined]
+            enable_affective_dialog=True,  # type: ignore[call-arg]
             tools=COMIC_TOOLS,
         )
 

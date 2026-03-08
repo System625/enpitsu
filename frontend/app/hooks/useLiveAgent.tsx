@@ -350,6 +350,13 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     return () => {
       wsRef.current?.close();
+      // Dispose thinking music on unmount
+      if (thinkingMusicRef.current) {
+        thinkingMusicRef.current.pause();
+        thinkingMusicRef.current.src = "";
+        thinkingMusicRef.current = null;
+      }
+      clearPcmQueue();
     };
   }, []);
 
