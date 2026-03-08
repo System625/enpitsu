@@ -4,7 +4,7 @@ import {
 import {
   ref, uploadString, getDownloadURL, deleteObject, listAll,
 } from "firebase/storage";
-import { db, storage } from "@/lib/firebase";
+import { getDbInstance, getStorageInstance } from "@/lib/firebase";
 import { ComicStyle, ComicPanel } from "./useLiveAgent";
 
 export interface Project {
@@ -34,18 +34,18 @@ interface ProjectRecord {
 }
 
 function projectsCol(uid: string) {
-  return collection(db, "users", uid, "projects");
+  return collection(getDbInstance(), "users", uid, "projects");
 }
 
 function projectDoc(uid: string, projectId: string) {
-  return doc(db, "users", uid, "projects", projectId);
+  return doc(getDbInstance(), "users", uid, "projects", projectId);
 }
 
 /** Upload a base64 image to Firebase Storage, return its download URL. */
 async function uploadPanelImage(uid: string, projectId: string, panelId: string, base64Url: string): Promise<string> {
   // base64Url is "data:image/jpeg;base64,<data>" or already a https URL
   if (base64Url.startsWith("http")) return base64Url;
-  const storageRef = ref(storage, `users/${uid}/projects/${projectId}/panels/${panelId}.jpg`);
+  const storageRef = ref(getStorageInstance(), `users/${uid}/projects/${projectId}/panels/${panelId}.jpg`);
   await uploadString(storageRef, base64Url, "data_url");
   return getDownloadURL(storageRef);
 }
@@ -84,7 +84,7 @@ export async function saveProject(uid: string, project: Project): Promise<void> 
 
 export async function deleteProject(uid: string, id: string): Promise<void> {
   // Delete all panel images from Storage
-  const folderRef = ref(storage, `users/${uid}/projects/${id}/panels`);
+  const folderRef = ref(getStorageInstance(), `users/${uid}/projects/${id}/panels`);
   try {
     const list = await listAll(folderRef);
     await Promise.all(list.items.map(item => deleteObject(item)));

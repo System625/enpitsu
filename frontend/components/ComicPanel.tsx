@@ -138,14 +138,8 @@ export function ComicPanel({ panel }: ComicPanelProps) {
         </button>
       )}
 
-      {/* Speech Bubble */}
-      <div className="absolute bottom-5 left-3 right-3">
-        <div className="comic-bubble relative px-4 py-2.5 bg-white border-[2.5px] border-skeuo-text">
-          <p className="text-[13px] font-extrabold text-gray-900 leading-snug text-center tracking-tight uppercase">
-            {panel.text}
-          </p>
-        </div>
-      </div>
+      {/* Caption is baked into the generated image — sr-only for accessibility */}
+      {panel.text && <span className="sr-only">{panel.text}</span>}
 
       {/* Comic Book halftone texture overlay */}
       <div className="absolute inset-0 opacity-10 pointer-events-none mix-blend-overlay bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiAvPgo8Y2lyY2xlIGN4PSI0IiBjeT0iNCIgcj0iMyIgZmlsbD0iIzAwMCIgLz4KPC9zdmc+')] bg-repeat" />

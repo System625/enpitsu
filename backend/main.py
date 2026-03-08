@@ -281,6 +281,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     # Transcription buffer — accumulate chunks until turn_complete
     # -------------------------------------------------------------------
     transcription_buffer: list[str] = []
+    initial_style_sent = False  # first style_update is just a sync, don't notify Gemini
 
     async def flush_transcription():
         """
@@ -294,6 +295,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             return
 
         logger.info(f"Agent transcription (flush): {full_text[:200]}")
+
+        # Record agent response in history for context replay on reconnect
+        agent.record_agent_response(full_text)
 
         # Normalise any garbled token
         normalised = re.sub(r"GEN\s*ERATE\s*_\s*PANEL\s*:", "GENERATE_PANEL:", full_text, flags=re.IGNORECASE)
@@ -364,9 +368,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             else:
                 await websocket.send_json(
                     {
-                        "type": "agent_response",
-                        "text": f"Panel {panel_number} failed — ask me to retry.",
-                        "status": "idle",
+                        "type": "panel_failed",
+                        "panel_number": panel_number,
+                        "message": f"Panel {panel_number} failed — ask me to retry.",
                     }
                 )
 
@@ -443,11 +447,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                                 },
                             )
                         else:
+                            # Tell frontend to remove the loading skeleton
                             await websocket.send_json(
                                 {
-                                    "type": "agent_response",
-                                    "text": f"Panel {panel_number} generation failed.",
-                                    "status": "idle",
+                                    "type": "panel_failed",
+                                    "panel_number": panel_number,
+                                    "message": f"Panel {panel_number} generation failed — ask me to retry.",
                                 }
                             )
                             await agent.send_tool_response(
@@ -528,10 +533,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             if not sc:
                 return
 
-            # Log user speech (input transcription)
+            # Log user speech (input transcription) and record in history
             input_tr = getattr(sc, "input_transcription", None)
             if input_tr and getattr(input_tr, "text", None):
                 logger.info(f"User said: {input_tr.text}")
+                agent._add_to_history("user", input_tr.text)
 
             # Accumulate agent output transcription (fallback GENERATE_PANEL path)
             output_tr = getattr(sc, "output_transcription", None)
@@ -590,6 +596,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
         while True:
             message = await websocket.receive()
 
+            # Handle WebSocket disconnect message
+            if message.get("type") == "websocket.disconnect":
+                logger.info(f"Client sent disconnect | session={session_id}")
+                break
+
             if "text" in message:
                 try:
                     data = json.loads(message["text"])
@@ -612,26 +623,31 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
                 elif msg_type == "style_update":
                     new_style = data.get("style", "american")
+                    old_style = session_data.get("current_style", "american")
                     session_data["current_style"] = new_style
                     logger.info(f"Style updated to: {new_style}")
-                    await agent.send_text(
-                        f"The user changed the art style to: {new_style}. Acknowledge briefly and continue."
-                    )
+                    if not initial_style_sent:
+                        initial_style_sent = True
+                    elif new_style != old_style:
+                        # Only notify Gemini when the style actually changed
+                        await agent.send_text(
+                            f"[System: The art style has been changed to '{new_style}'. "
+                            f"Acknowledge in one short sentence. Do NOT generate any panels right now.]"
+                        )
 
             elif "bytes" in message:
                 audio_bytes = message["bytes"]
-                logger.debug(f"Received audio chunk: {len(audio_bytes)} bytes")
-                try:
-                    await agent.send_audio(audio_bytes)
-                except Exception as e:
-                    logger.error(f"send_audio failed: {e}")
+                await agent.send_audio(audio_bytes)
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected | session={session_id}")
     except Exception as e:
         logger.error(f"WebSocket error | session={session_id}: {e}", exc_info=True)
     finally:
+        agent._stop = True
         agent_task.cancel()
+        if agent._session_task:
+            agent._session_task.cancel()
         heartbeat_task.cancel()
         try:
             await websocket.close()

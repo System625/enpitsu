@@ -51,6 +51,8 @@ class ImageGenerator:
                         number_of_images=1,
                         output_mime_type="image/jpeg",
                         aspect_ratio="4:3",
+                        safety_filter_level=types.SafetyFilterLevel.BLOCK_ONLY_HIGH,
+                        person_generation=types.PersonGeneration.ALLOW_ALL,
                     ),
                 ),
             )

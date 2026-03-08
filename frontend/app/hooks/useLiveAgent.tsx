@@ -54,10 +54,12 @@ export interface ComicPanel {
   loading?: boolean;
 }
 
+export type MicMode = "push-to-talk" | "open-mic";
+
 interface LiveAgentContextType {
   agentState: AgentState;
   panels: ComicPanel[];
-  currentStyle: ComicStyle;
+  currentStyle: ComicStyle | null;
   isRecording: boolean;
   audioAnalyser: AnalyserNode | null;
   setAudioAnalyser: (analyser: AnalyserNode | null) => void;
@@ -65,8 +67,12 @@ interface LiveAgentContextType {
   currentProjectId: string;
   storyLoaded: boolean;
   connectionStatus: "connected" | "reconnecting" | "disconnected" | null;
+  micMode: MicMode;
+  isMuted: boolean;
+  setMicMode: (mode: MicMode) => void;
+  setIsMuted: (muted: boolean) => void;
   setAgentState: (state: AgentState) => void;
-  setCurrentStyle: (style: ComicStyle) => void;
+  setCurrentStyle: (style: ComicStyle | null) => void;
   setProjectName: (name: string) => void;
   startRecording: () => void;
   stopRecording: (userText?: string) => void;
@@ -119,7 +125,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const [agentState, setAgentState] = useState<AgentState>("idle");
   const [panels, setPanels] = useState<ComicPanel[]>([]);
-  const [currentStyle, setCurrentStyle] = useState<ComicStyle>("american");
+  const [currentStyle, setCurrentStyle] = useState<ComicStyle | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const [projectName, setProjectName] = useState("Untitled Story");
@@ -129,6 +135,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   );
 
   const [storyLoaded, setStoryLoaded] = useState(false);
+  const [micMode, setMicMode] = useState<MicMode>("push-to-talk");
+  const [isMuted, setIsMuted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -179,9 +187,16 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     }
   }, [agentState]);
 
-  const connectWebSocket = useCallback((sessionId: string) => {
+  const connectWebSocket = useCallback(async (sessionId: string) => {
     const wsUrl = BACKEND_URL.replace(/^http/, "ws");
-    const ws = new WebSocket(`${wsUrl}/ws/session/${sessionId}`);
+    let tokenParam = "";
+    if (user) {
+      try {
+        const idToken = await user.getIdToken();
+        tokenParam = `?token=${encodeURIComponent(idToken)}`;
+      } catch { /* guest mode */ }
+    }
+    const ws = new WebSocket(`${wsUrl}/ws/session/${sessionId}${tokenParam}`);
     wsRef.current = ws;
     sessionIdRef.current = sessionId;
     receivingPcmRef.current = false; // reset per session — TTS is fallback until PCM arrives
@@ -194,15 +209,28 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
     ws.onopen = () => {
       console.log("WebSocket connected for session:", sessionId);
+      const isFirstConnect = reconnectAttemptsRef.current === 0;
       reconnectAttemptsRef.current = 0;
       setConnectionStatus("connected");
-      // Immediately sync the current style so backend doesn't use its default
-      ws.send(JSON.stringify({ type: "style_update", style: currentStyle }));
+      // Sync the current style if user has already picked one
+      if (currentStyle) {
+        ws.send(JSON.stringify({ type: "style_update", style: currentStyle }));
+      }
+      // Send greeting prompt only on first connect, not on reconnects
+      if (isFirstConnect) {
+        ws.send(JSON.stringify({
+          type: "user_message",
+          text: "[System: The user just uploaded their story. Greet them warmly, introduce yourself as Enpitsu their comic co-creator, and ask what style or scene they'd like to start with. Keep it to 2 sentences max.]",
+        }));
+      }
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data as string);
+
+        // Heartbeat — ignore silently
+        if (msg.type === "ping") return;
 
         // Clear thinking timeout on any response from backend
         if (thinkingTimerRef.current) { clearTimeout(thinkingTimerRef.current); thinkingTimerRef.current = null; }
@@ -303,6 +331,11 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
           }));
         }
 
+        // Panel generation failed — remove loading skeleton
+        if (msg.type === "panel_failed") {
+          setPanels(prev => prev.filter(p => p.id !== `loading_panel_${msg.panel_number}`));
+        }
+
         if (msg.type === "error") {
           console.error("Backend error:", msg.message);
           setAgentState("idle");
@@ -317,6 +350,9 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     ws.onclose = (event) => {
       console.log("WebSocket closed for session:", sessionId, "code:", event.code);
       wsRef.current = null;
+      // Stop recording to prevent endless "WebSocket not open" warnings
+      setIsRecording(false);
+      setAgentState("idle");
       // Auto-reconnect with exponential backoff (up to 5 attempts)
       if (!event.wasClean && reconnectAttemptsRef.current < 5) {
         setConnectionStatus("reconnecting");
@@ -330,7 +366,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         setConnectionStatus("disconnected");
       }
     };
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     return () => {
@@ -351,7 +387,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         name: projectName,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        style: currentStyle,
+        style: currentStyle ?? "american",
         panels: saveable,
       }).catch(err => console.error("Auto-save failed:", err));
     }, 1000);
@@ -370,11 +406,9 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
   const sendAudioChunk = useCallback((pcmBytes: ArrayBuffer) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      console.debug("[audio] Sending PCM chunk:", pcmBytes.byteLength, "bytes");
       wsRef.current.send(pcmBytes);
-    } else {
-      console.warn("[audio] WebSocket not open, dropping audio chunk");
     }
+    // Silently drop chunks when WS is not open — no need to spam console
   }, []);
 
   const startRecording = useCallback(() => {
@@ -420,7 +454,14 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${BACKEND_URL}/upload`, { method: "POST", body: formData });
+      const headers: Record<string, string> = {};
+      if (user) {
+        try {
+          const idToken = await user.getIdToken();
+          headers["Authorization"] = `Bearer ${idToken}`;
+        } catch { /* guest mode — no token */ }
+      }
+      const res = await fetch(`${BACKEND_URL}/upload`, { method: "POST", body: formData, headers });
 
       if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
 
@@ -433,19 +474,16 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
       connectWebSocket(session_id);
 
-      setAgentState("speaking");
-      speak(
-        `Story uploaded! Found ${scene_count} scenes. Talk to the agent to start illustrating your comic!`,
-        () => setAgentState("idle"),
-      );
-      speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 8000);
+      // Let the Gemini agent greet the user with its own voice (not browser TTS).
+      // We send a nudge text after the WebSocket connects so the agent speaks first.
+      setAgentState("thinking");
     } catch (err) {
       console.error("Upload error:", err);
       setAgentState("speaking");
       speak("I had trouble uploading that file. Please try again.", () => setAgentState("idle"));
       speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 6000);
     }
-  }, [connectWebSocket]);
+  }, [connectWebSocket, user]);
 
   const interruptAgent = useCallback(() => {
     window.speechSynthesis?.cancel();
@@ -463,7 +501,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       name: projectName,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      style: currentStyle,
+      style: currentStyle ?? "american",
       panels,
     }).catch(err => console.error("Save failed:", err));
   }, [user, currentProjectId, projectName, currentStyle, panels]);
@@ -600,7 +638,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   }, [panels, projectName, currentStyle]);
 
   useEffect(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (currentStyle && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "style_update", style: currentStyle }));
     }
   }, [currentStyle]);
@@ -618,6 +656,10 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         currentProjectId,
         storyLoaded,
         connectionStatus,
+        micMode,
+        isMuted,
+        setMicMode,
+        setIsMuted,
         setAgentState,
         setCurrentStyle,
         setProjectName,
