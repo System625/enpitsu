@@ -8,8 +8,9 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Gemini Live API model — 2.5 Flash native audio has better voice quality and responsiveness
-LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+# Gemini Live API model (confirmed working on Vertex AI)
+# Note: gemini-2.5-flash-native-audio-preview-12-2025 is AI Studio only, not Vertex AI
+LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
 
 # Tool definitions for structured panel generation and editing
 COMIC_TOOLS = [
