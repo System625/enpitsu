@@ -185,12 +185,21 @@ class GeminiAgent:
                     logger.error(f"send_text task error: {e}")
 
             async def _receive_loop():
-                """Receive all Gemini events and forward to on_message."""
+                """Receive all Gemini events and forward to on_message.
+                Re-enters session.receive() after each turn_complete so the
+                session stays alive across multiple turns.
+                """
                 try:
-                    async for message in session.receive():
+                    while not self._stop:
+                        async for message in session.receive():
+                            if self._stop:
+                                break
+                            await on_message(message)
+                        # session.receive() exhausted after turn_complete — loop back
+                        # to wait for the next turn without closing the session
                         if self._stop:
                             break
-                        await on_message(message)
+                        logger.debug("Receive loop: turn complete, waiting for next turn...")
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
