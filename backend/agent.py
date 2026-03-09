@@ -85,8 +85,7 @@ COMIC_TOOLS = [
                         "old_text": types.Schema(
                             type=types.Type.STRING,
                             description=(
-                                "The exact text snippet to find and replace. "
-                                "Must match the current story text exactly."
+                                "The exact text snippet to find and replace. Must match the current story text exactly."
                             ),
                         ),
                         "new_text": types.Schema(
@@ -203,9 +202,7 @@ class GeminiAgent:
             system_instruction=system_instruction,
             response_modalities=["AUDIO"],  # type: ignore[arg-type]
             speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                )
+                voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede"))
             ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(

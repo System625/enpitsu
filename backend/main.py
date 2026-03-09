@@ -151,6 +151,7 @@ def _load_session_from_firestore(uid: str, project_id: str) -> Optional[Dict]:
 
         story_text = data.get("story_text", "")
         from processor import StoryProcessor
+
         scenes = StoryProcessor.break_into_scenes(story_text) if story_text else []
 
         return {
@@ -317,10 +318,7 @@ async def resume_session(
         raise HTTPException(status_code=404, detail="Session not found in Firestore.")
 
     sessions[project_id] = session_data
-    logger.info(
-        f"Session restored from Firestore: {project_id} | "
-        f"panels={len(session_data['panels'])} | uid={uid}"
-    )
+    logger.info(f"Session restored from Firestore: {project_id} | panels={len(session_data['panels'])} | uid={uid}")
 
     return {
         "session_id": project_id,
@@ -540,9 +538,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     style = session_data.get("current_style", "american")
 
                     logger.info(f"Tool call: {fc.name} | panel={panel_number} | args={fc.args}")
-                    await safe_send(
-                        {"type": "panel_loading", "panel_number": panel_number, "caption": caption}
-                    )
+                    await safe_send({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
                     await safe_send(
                         {"type": "status_update", "status": "generating", "text": f"Drawing panel {panel_number}..."}
                     )
@@ -591,13 +587,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                             }
                         )
                         await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
-                        return (fc.id or "", fc.name, {
-                            "status": "error",
-                            "message": "Image generation was blocked by safety filters. "
-                            "Rewrite the visual_description to avoid depicting violence, "
-                            "weapons, or aggressive physical contact. Focus on emotions, "
-                            "expressions, and implied tension instead of explicit actions."
-                        })
+                        return (
+                            fc.id or "",
+                            fc.name,
+                            {
+                                "status": "error",
+                                "message": "Image generation was blocked by safety filters. "
+                                "Rewrite the visual_description to avoid depicting violence, "
+                                "weapons, or aggressive physical contact. Focus on emotions, "
+                                "expressions, and implied tension instead of explicit actions.",
+                            },
+                        )
 
                 async def _handle_edit(fc) -> tuple[str, str, dict]:
                     """Edit one panel, send UI updates, return the tool response tuple."""
@@ -643,7 +643,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                         return (fc.id or "", fc.name, {"status": "success", "panel_number": panel_number})
                     else:
                         await safe_send(
-                            {"type": "agent_response", "text": f"Couldn't redraw panel {panel_number}.", "status": "idle"}
+                            {
+                                "type": "agent_response",
+                                "text": f"Couldn't redraw panel {panel_number}.",
+                                "status": "idle",
+                            }
                         )
                         await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
                         return (fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"})
@@ -659,11 +663,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                         story = session_data.get("story_text", "")
                         if old_text and old_text in story:
                             session_data["story_text"] = story.replace(old_text, new_text, 1)
-                            await safe_send({
-                                "type": "update_line",
-                                "old": old_text,
-                                "new": new_text,
-                            })
+                            await safe_send(
+                                {
+                                    "type": "update_line",
+                                    "old": old_text,
+                                    "new": new_text,
+                                }
+                            )
                             # Persist updated story text to Firestore
                             _save_full_session_to_firestore(
                                 session_data["uid"], session_data["project_id"], session_data
@@ -678,10 +684,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     elif fc.name == "play_music_during_wait":
                         music_type = (fc.args or {}).get("music_type", "calm")
                         logger.info(f"Tool call: play_music_during_wait | type={music_type}")
-                        await safe_send({
-                            "type": "play_music",
-                            "music_type": music_type,
-                        })
+                        await safe_send(
+                            {
+                                "type": "play_music",
+                                "music_type": music_type,
+                            }
+                        )
                         immediate_responses.append(
                             (fc.id or "", fc.name, {"status": "success", "message": f"Playing {music_type} music."})
                         )
@@ -813,10 +821,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     await websocket.send_json({"type": "status_update", "status": "thinking", "text": "Connecting..."})
 
     # Send story text to frontend for the editor
-    await websocket.send_json({
-        "type": "push_story",
-        "text": session_data.get("story_text", ""),
-    })
+    await websocket.send_json(
+        {
+            "type": "push_story",
+            "text": session_data.get("story_text", ""),
+        }
+    )
 
     # -------------------------------------------------------------------
     # Main receive loop
@@ -857,7 +867,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     logger.info(f"Style updated to: {new_style}")
                     # Persist style change to Firestore
                     _save_session_meta_to_firestore(
-                        session_data["uid"], session_data["project_id"],
+                        session_data["uid"],
+                        session_data["project_id"],
                         {"current_style": new_style, "updated_at": _firestore_timestamp()},
                     )
                     if not initial_style_sent:
