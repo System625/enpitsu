@@ -112,6 +112,63 @@ def _save_session_meta_to_firestore(uid: str, project_id: str, data: dict):
         logger.warning(f"Firestore session meta save failed: {e}")
 
 
+def _save_full_session_to_firestore(uid: str, project_id: str, session_data: dict):
+    """Persist full session state to Firestore for resumption across restarts."""
+    if _db is None:
+        return
+    try:
+        doc = {
+            "filename": session_data.get("filename", ""),
+            "story_text": session_data.get("story_text", ""),
+            "current_style": session_data.get("current_style", "american"),
+            "current_scene_index": session_data.get("current_scene_index", 0),
+            "scene_count": len(session_data.get("scenes", [])),
+            "status": session_data.get("status", "uploaded"),
+            "uid": uid,
+            "updated_at": _firestore_timestamp(),
+        }
+        _db.collection("users").document(uid).collection("projects").document(project_id).set(doc, merge=True)
+    except Exception as e:
+        logger.warning(f"Firestore full session save failed: {e}")
+
+
+def _load_session_from_firestore(uid: str, project_id: str) -> Optional[Dict]:
+    """Load a session from Firestore. Returns session dict or None."""
+    if _db is None:
+        return None
+    try:
+        doc_ref = _db.collection("users").document(uid).collection("projects").document(project_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict()
+
+        # Load panels subcollection
+        panels = []
+        panels_ref = doc_ref.collection("panels").order_by("panel_number").stream()
+        for panel_doc in panels_ref:
+            panels.append(panel_doc.to_dict())
+
+        story_text = data.get("story_text", "")
+        from processor import StoryProcessor
+        scenes = StoryProcessor.break_into_scenes(story_text) if story_text else []
+
+        return {
+            "filename": data.get("filename", ""),
+            "status": data.get("status", "uploaded"),
+            "story_text": story_text,
+            "scenes": scenes,
+            "current_scene_index": data.get("current_scene_index", 0),
+            "current_style": data.get("current_style", "american"),
+            "panels": panels,
+            "uid": uid,
+            "project_id": project_id,
+        }
+    except Exception as e:
+        logger.warning(f"Firestore session load failed: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # In-memory session storage (backed by Firestore when available)
 # ---------------------------------------------------------------------------
@@ -169,7 +226,8 @@ async def upload_story(
         "project_id": session_id,
     }
 
-    # Persist session metadata to Firestore
+    # Persist full session to Firestore (includes story_text for resumption)
+    _save_full_session_to_firestore(uid, session_id, sessions[session_id])
     _save_session_meta_to_firestore(
         uid,
         session_id,
@@ -225,6 +283,54 @@ async def get_panels(session_id: str):
     return {"panels": sessions[session_id]["panels"]}
 
 
+@app.post("/session/{project_id}/resume")
+async def resume_session(
+    project_id: str,
+    authorization: str = Header(default=""),
+):
+    """
+    Resume a previously saved session from Firestore.
+    Returns a new session_id (which reuses the project_id) that can be used
+    with the WebSocket endpoint.
+    """
+    uid = "anonymous"
+    if authorization:
+        token = _extract_bearer(authorization)
+        decoded = await verify_firebase_token(token)
+        if decoded:
+            uid = decoded["uid"]
+
+    # Check if already in memory
+    if project_id in sessions:
+        session = sessions[project_id]
+        return {
+            "session_id": project_id,
+            "filename": session["filename"],
+            "scene_count": len(session["scenes"]),
+            "panel_count": len(session["panels"]),
+            "restored_from": "memory",
+        }
+
+    # Try loading from Firestore
+    session_data = _load_session_from_firestore(uid, project_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found in Firestore.")
+
+    sessions[project_id] = session_data
+    logger.info(
+        f"Session restored from Firestore: {project_id} | "
+        f"panels={len(session_data['panels'])} | uid={uid}"
+    )
+
+    return {
+        "session_id": project_id,
+        "filename": session_data["filename"],
+        "scene_count": len(session_data["scenes"]),
+        "panel_count": len(session_data["panels"]),
+        "restored_from": "firestore",
+    }
+
+
 # ---------------------------------------------------------------------------
 # WebSocket — real-time agent streaming
 # ---------------------------------------------------------------------------
@@ -278,6 +384,48 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
         return
 
     # -------------------------------------------------------------------
+    # WebSocket send guard — prevents "send after close" errors
+    # -------------------------------------------------------------------
+    ws_closed = False
+
+    async def safe_send(data: dict):
+        """Send JSON to the WebSocket, silently ignoring if already closed."""
+        if ws_closed:
+            return
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            pass  # WebSocket already closed — nothing to do
+
+    # -------------------------------------------------------------------
+    # Tool response batching — accumulate generate_comic_panel responses
+    # and send them all at once after a debounce window. This prevents
+    # Gemini from speaking between panels when it sends tool calls one at a time.
+    # -------------------------------------------------------------------
+    pending_tool_responses: list[tuple[str, str, dict]] = []
+    tool_generation_tasks: list[asyncio.Task] = []
+    tool_batch_timer: list[Optional[asyncio.Task]] = [None]  # mutable container
+    expected_panel_count: list[int] = [6]  # how many panels we expect per batch
+
+    async def _flush_tool_responses():
+        """Send all accumulated tool responses to Gemini at once."""
+        if not pending_tool_responses:
+            return
+        responses = list(pending_tool_responses)
+        pending_tool_responses.clear()
+        logger.info(f"Flushing {len(responses)} batched tool responses to Gemini")
+        await agent.send_tool_responses_batch(responses)
+
+    async def _schedule_tool_flush(delay: float = 2.0):
+        """Wait for more tool calls, then flush. Cancelled if new calls arrive."""
+        await asyncio.sleep(delay)
+        # Wait for any in-progress image generation tasks
+        if tool_generation_tasks:
+            await asyncio.gather(*tool_generation_tasks, return_exceptions=True)
+            tool_generation_tasks.clear()
+        await _flush_tool_responses()
+
+    # -------------------------------------------------------------------
     # Transcription buffer — accumulate chunks until turn_complete
     # -------------------------------------------------------------------
     transcription_buffer: list[str] = []
@@ -301,14 +449,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
         normalised = re.sub(r"CAP\s*TION\s*:", "CAPTION:", normalised, flags=re.IGNORECASE)
 
         if "GENERATE_PANEL:" not in normalised:
-            await websocket.send_json({"type": "agent_response", "text": normalised, "status": "speaking"})
-            await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+            await safe_send({"type": "agent_response", "text": normalised, "status": "speaking"})
+            await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
             return
 
         parts = normalised.split("GENERATE_PANEL:")
         intro = parts[0].strip()
         if intro:
-            await websocket.send_json({"type": "agent_response", "text": intro, "status": "speaking"})
+            await safe_send({"type": "agent_response", "text": intro, "status": "speaking"})
 
         base_number = len(session_data["panels"]) + 1
         panel_specs = []
@@ -322,8 +470,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             panel_specs.append((base_number + i, prompt, caption))
 
         for panel_number, _, caption in panel_specs:
-            await websocket.send_json({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
-        await websocket.send_json(
+            await safe_send({"type": "panel_loading", "panel_number": panel_number, "caption": caption})
+        await safe_send(
             {"type": "status_update", "status": "generating", "text": f"Drawing {len(panel_specs)} panel(s)..."}
         )
 
@@ -353,7 +501,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                         "created_at": _firestore_timestamp(),
                     },
                 )
-                await websocket.send_json(
+                await safe_send(
                     {
                         "type": "panel_generated",
                         "image": image_b64,
@@ -363,7 +511,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     }
                 )
             else:
-                await websocket.send_json(
+                await safe_send(
                     {
                         "type": "panel_failed",
                         "panel_number": panel_number,
@@ -372,7 +520,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                 )
 
         await asyncio.gather(*[_gen(n, p, c) for n, p, c in panel_specs])
-        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+        await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
 
     # -------------------------------------------------------------------
     # on_agent_message — handles all messages from Gemini Live API
@@ -382,146 +530,199 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             # --- Tool calls (structured function calling) ---
             tool_call = getattr(message, "tool_call", None)
             if tool_call and tool_call.function_calls:
+                # Assign panel numbers up-front (before any async work) so
+                # concurrent tasks get stable, non-colliding numbers.
+                panel_counter = [len(session_data["panels"])]
+
+                async def _handle_generate(fc, panel_number: int) -> tuple[str, str, dict]:
+                    """Generate one panel, send UI updates, return the tool response tuple."""
+                    prompt = (fc.args or {}).get("visual_description", "")
+                    caption = (fc.args or {}).get("caption", "")
+                    style = session_data.get("current_style", "american")
+
+                    logger.info(f"Tool call: {fc.name} | panel={panel_number} | args={fc.args}")
+                    await safe_send(
+                        {"type": "panel_loading", "panel_number": panel_number, "caption": caption}
+                    )
+                    await safe_send(
+                        {"type": "status_update", "status": "generating", "text": f"Drawing panel {panel_number}..."}
+                    )
+
+                    image_b64 = await image_gen.generate_panel(prompt, style=style)
+                    if image_b64:
+                        session_data["panels"].append(
+                            {
+                                "panel_number": panel_number,
+                                "prompt": prompt,
+                                "image": image_b64,
+                                "caption": caption,
+                                "style": style,
+                                "scene_index": session_data["current_scene_index"],
+                            }
+                        )
+                        _save_panel_to_firestore(
+                            session_data["uid"],
+                            session_data["project_id"],
+                            panel_number,
+                            {
+                                "prompt": prompt,
+                                "caption": caption,
+                                "style": style,
+                                "panel_number": panel_number,
+                                "created_at": _firestore_timestamp(),
+                            },
+                        )
+                        await safe_send(
+                            {
+                                "type": "panel_generated",
+                                "image": image_b64,
+                                "prompt": prompt,
+                                "text": caption,
+                                "panel_number": panel_number,
+                            }
+                        )
+                        await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
+                        return (fc.id or "", fc.name, {"status": "success", "panel_number": panel_number})
+                    else:
+                        await safe_send(
+                            {
+                                "type": "panel_failed",
+                                "panel_number": panel_number,
+                                "message": f"Panel {panel_number} generation failed — ask me to retry.",
+                            }
+                        )
+                        await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
+                        return (fc.id or "", fc.name, {
+                            "status": "error",
+                            "message": "Image generation was blocked by safety filters. "
+                            "Rewrite the visual_description to avoid depicting violence, "
+                            "weapons, or aggressive physical contact. Focus on emotions, "
+                            "expressions, and implied tension instead of explicit actions."
+                        })
+
+                async def _handle_edit(fc) -> tuple[str, str, dict]:
+                    """Edit one panel, send UI updates, return the tool response tuple."""
+                    panel_number = int((fc.args or {}).get("panel_number", 0))
+                    new_description = (fc.args or {}).get("new_description", "")
+                    new_caption = (fc.args or {}).get("new_caption", "")
+                    style = session_data.get("current_style", "american")
+
+                    logger.info(f"Tool call: {fc.name} | panel={panel_number} | args={fc.args}")
+                    await safe_send(
+                        {"type": "status_update", "status": "generating", "text": f"Redrawing panel {panel_number}..."}
+                    )
+
+                    image_b64 = await image_gen.generate_panel(new_description, style=style)
+                    if image_b64:
+                        for p in session_data["panels"]:
+                            if p.get("panel_number") == panel_number:
+                                p["image"] = image_b64
+                                p["prompt"] = new_description
+                                p["caption"] = new_caption
+                        _save_panel_to_firestore(
+                            session_data["uid"],
+                            session_data["project_id"],
+                            panel_number,
+                            {
+                                "prompt": new_description,
+                                "caption": new_caption,
+                                "style": style,
+                                "panel_number": panel_number,
+                                "updated_at": _firestore_timestamp(),
+                            },
+                        )
+                        await safe_send(
+                            {
+                                "type": "panel_updated",
+                                "panel_number": panel_number,
+                                "image": image_b64,
+                                "text": new_caption,
+                                "prompt": new_description,
+                            }
+                        )
+                        await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
+                        return (fc.id or "", fc.name, {"status": "success", "panel_number": panel_number})
+                    else:
+                        await safe_send(
+                            {"type": "agent_response", "text": f"Couldn't redraw panel {panel_number}.", "status": "idle"}
+                        )
+                        await safe_send({"type": "status_update", "status": "idle", "text": "Ready."})
+                        return (fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"})
+
+                # Build concurrent tasks — one per function call
+                generate_tasks = []
+                immediate_responses = []  # non-generate responses sent immediately
                 for fc in tool_call.function_calls:
-                    logger.info(f"Tool call: {fc.name} | args={fc.args}")
-
-                    if fc.name == "generate_comic_panel":
-                        prompt = (fc.args or {}).get("visual_description", "")
-                        caption = (fc.args or {}).get("caption", "")
-                        panel_number = len(session_data["panels"]) + 1
-                        style = session_data.get("current_style", "american")
-
-                        await websocket.send_json(
-                            {"type": "panel_loading", "panel_number": panel_number, "caption": caption}
-                        )
-                        await websocket.send_json(
-                            {
-                                "type": "status_update",
-                                "status": "generating",
-                                "text": f"Drawing panel {panel_number}...",
-                            }
-                        )
-
-                        image_b64 = await image_gen.generate_panel(prompt, style=style)
-                        if image_b64:
-                            session_data["panels"].append(
-                                {
-                                    "panel_number": panel_number,
-                                    "prompt": prompt,
-                                    "image": image_b64,
-                                    "caption": caption,
-                                    "style": style,
-                                    "scene_index": session_data["current_scene_index"],
-                                }
+                    if fc.name == "update_specific_line":
+                        old_text = (fc.args or {}).get("old_text", "")
+                        new_text = (fc.args or {}).get("new_text", "")
+                        logger.info(f"Tool call: update_specific_line | old={old_text[:60]} | new={new_text[:60]}")
+                        story = session_data.get("story_text", "")
+                        if old_text and old_text in story:
+                            session_data["story_text"] = story.replace(old_text, new_text, 1)
+                            await safe_send({
+                                "type": "update_line",
+                                "old": old_text,
+                                "new": new_text,
+                            })
+                            # Persist updated story text to Firestore
+                            _save_full_session_to_firestore(
+                                session_data["uid"], session_data["project_id"], session_data
                             )
-                            _save_panel_to_firestore(
-                                session_data["uid"],
-                                session_data["project_id"],
-                                panel_number,
-                                {
-                                    "prompt": prompt,
-                                    "caption": caption,
-                                    "style": style,
-                                    "panel_number": panel_number,
-                                    "created_at": _firestore_timestamp(),
-                                },
-                            )
-                            await websocket.send_json(
-                                {
-                                    "type": "panel_generated",
-                                    "image": image_b64,
-                                    "prompt": prompt,
-                                    "text": caption,
-                                    "panel_number": panel_number,
-                                }
-                            )
-                            await agent.send_tool_response(
-                                fc.id or "",
-                                fc.name,
-                                {
-                                    "status": "success",
-                                    "panel_number": panel_number,
-                                },
+                            immediate_responses.append(
+                                (fc.id or "", fc.name, {"status": "success", "message": "Text updated."})
                             )
                         else:
-                            # Tell frontend to remove the loading skeleton
-                            await websocket.send_json(
-                                {
-                                    "type": "panel_failed",
-                                    "panel_number": panel_number,
-                                    "message": f"Panel {panel_number} generation failed — ask me to retry.",
-                                }
+                            immediate_responses.append(
+                                (fc.id or "", fc.name, {"status": "error", "message": "old_text not found in story."})
                             )
-                            await agent.send_tool_response(
-                                fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"}
-                            )
+                    elif fc.name == "play_music_during_wait":
+                        music_type = (fc.args or {}).get("music_type", "calm")
+                        logger.info(f"Tool call: play_music_during_wait | type={music_type}")
+                        await safe_send({
+                            "type": "play_music",
+                            "music_type": music_type,
+                        })
+                        immediate_responses.append(
+                            (fc.id or "", fc.name, {"status": "success", "message": f"Playing {music_type} music."})
+                        )
+                    elif fc.name == "generate_comic_panel":
+                        panel_counter[0] += 1
 
-                        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+                        async def _gen_and_queue(fc_ref, pn):
+                            result = await _handle_generate(fc_ref, pn)
+                            pending_tool_responses.append(result)
 
+                        task = asyncio.create_task(_gen_and_queue(fc, panel_counter[0]))
+                        generate_tasks.append(task)
+                        tool_generation_tasks.append(task)
                     elif fc.name == "edit_existing_panel":
-                        panel_number = int((fc.args or {}).get("panel_number", 0))
-                        new_description = (fc.args or {}).get("new_description", "")
-                        new_caption = (fc.args or {}).get("new_caption", "")
-                        style = session_data.get("current_style", "american")
-
-                        await websocket.send_json(
-                            {
-                                "type": "status_update",
-                                "status": "generating",
-                                "text": f"Redrawing panel {panel_number}...",
-                            }
+                        result = await _handle_edit(fc)
+                        immediate_responses.append(result)
+                    elif fc.name == "clear_all_panels":
+                        reason = (fc.args or {}).get("reason", "")
+                        logger.info(f"Tool call: clear_all_panels | reason={reason}")
+                        panel_count = len(session_data["panels"])
+                        session_data["panels"] = []
+                        await safe_send({"type": "panels_cleared"})
+                        await safe_send(
+                            {"type": "status_update", "status": "idle", "text": f"Cleared {panel_count} panels."}
+                        )
+                        immediate_responses.append(
+                            (fc.id or "", fc.name, {"status": "success", "panels_cleared": panel_count})
                         )
 
-                        image_b64 = await image_gen.generate_panel(new_description, style=style)
-                        if image_b64:
-                            # Update in session memory
-                            for p in session_data["panels"]:
-                                if p.get("panel_number") == panel_number:
-                                    p["image"] = image_b64
-                                    p["prompt"] = new_description
-                                    p["caption"] = new_caption
-                            _save_panel_to_firestore(
-                                session_data["uid"],
-                                session_data["project_id"],
-                                panel_number,
-                                {
-                                    "prompt": new_description,
-                                    "caption": new_caption,
-                                    "style": style,
-                                    "panel_number": panel_number,
-                                    "updated_at": _firestore_timestamp(),
-                                },
-                            )
-                            await websocket.send_json(
-                                {
-                                    "type": "panel_updated",
-                                    "panel_number": panel_number,
-                                    "image": image_b64,
-                                    "text": new_caption,
-                                    "prompt": new_description,
-                                }
-                            )
-                            await agent.send_tool_response(
-                                fc.id or "",
-                                fc.name,
-                                {
-                                    "status": "success",
-                                    "panel_number": panel_number,
-                                },
-                            )
-                        else:
-                            await websocket.send_json(
-                                {
-                                    "type": "agent_response",
-                                    "text": f"Couldn't redraw panel {panel_number}.",
-                                    "status": "idle",
-                                }
-                            )
-                            await agent.send_tool_response(
-                                fc.id or "", fc.name, {"status": "error", "message": "Image generation failed"}
-                            )
+                # Send non-generate responses immediately
+                if immediate_responses:
+                    await agent.send_tool_responses_batch(immediate_responses)
 
-                        await websocket.send_json({"type": "status_update", "status": "idle", "text": "Ready."})
+                # For generate calls: use debounce batching.
+                # Cancel any existing flush timer and restart it — this lets us
+                # accumulate tool calls that Gemini sends one at a time.
+                if generate_tasks:
+                    if tool_batch_timer[0] and not tool_batch_timer[0].done():
+                        tool_batch_timer[0].cancel()
+                    tool_batch_timer[0] = asyncio.create_task(_schedule_tool_flush(3.0))
 
                 return  # tool call handled — don't process server_content below
 
@@ -530,25 +731,28 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             if not sc:
                 return
 
+            # Suppress Gemini speech while panels are being generated —
+            # prevents the AI from talking between individual panel generations
+            is_generating = bool(pending_tool_responses) or bool(tool_generation_tasks)
+
             # Log user speech (input transcription) and record in history
             input_tr = getattr(sc, "input_transcription", None)
             if input_tr and getattr(input_tr, "text", None):
                 logger.info(f"User said: {input_tr.text}")
-                agent._add_to_history("user", input_tr.text)
 
             # Accumulate agent output transcription (fallback GENERATE_PANEL path)
             output_tr = getattr(sc, "output_transcription", None)
             if output_tr and getattr(output_tr, "text", None):
                 transcription_buffer.append(output_tr.text)
 
-            # Forward audio chunks to frontend
+            # Forward audio chunks to frontend (suppress while generating panels)
             model_turn = getattr(sc, "model_turn", None)
-            if model_turn:
+            if model_turn and not is_generating:
                 for part in getattr(model_turn, "parts", []):
                     inline_data = getattr(part, "inline_data", None)
                     if inline_data and getattr(inline_data, "data", None):
                         audio_b64 = base64.b64encode(inline_data.data).decode("utf-8")
-                        await websocket.send_json(
+                        await safe_send(
                             {
                                 "type": "agent_audio",
                                 "audio": audio_b64,
@@ -558,7 +762,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
             # Forward interrupted event — frontend uses this to clear audio queue
             if getattr(sc, "interrupted", False):
-                await websocket.send_json({"type": "interrupted"})
+                await safe_send({"type": "interrupted"})
                 logger.info("Gemini interrupted signal forwarded to frontend")
 
             # Flush transcription buffer when Gemini signals turn complete
@@ -589,7 +793,31 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
     heartbeat_task = asyncio.create_task(heartbeat())
 
-    await websocket.send_json({"type": "status_update", "status": "idle", "text": "Agent ready."})
+    # Send greeting AFTER Gemini session is confirmed open — otherwise the
+    # message arrives before the session is ready and gets dropped.
+    async def _send_greeting():
+        try:
+            await agent.wait_until_ready(timeout=15.0)
+            await agent.send_text(
+                "Greet the user warmly. You are Enpitsu, their AI comic co-creator. "
+                "Tell them you've read their story. Ask what art style they'd like and which scene to start with. "
+                "Keep it to 2-3 sentences, spoken naturally."
+            )
+            logger.info("Greeting sent to Gemini after session ready")
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for Gemini session — skipping greeting")
+        except Exception as e:
+            logger.error(f"Greeting send failed: {e}")
+
+    asyncio.create_task(_send_greeting())
+
+    await websocket.send_json({"type": "status_update", "status": "thinking", "text": "Connecting..."})
+
+    # Send story text to frontend for the editor
+    await websocket.send_json({
+        "type": "push_story",
+        "text": session_data.get("story_text", ""),
+    })
 
     # -------------------------------------------------------------------
     # Main receive loop
@@ -628,6 +856,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     old_style = session_data.get("current_style", "american")
                     session_data["current_style"] = new_style
                     logger.info(f"Style updated to: {new_style}")
+                    # Persist style change to Firestore
+                    _save_session_meta_to_firestore(
+                        session_data["uid"], session_data["project_id"],
+                        {"current_style": new_style, "updated_at": _firestore_timestamp()},
+                    )
                     if not initial_style_sent:
                         initial_style_sent = True
                     elif new_style != old_style:
@@ -646,6 +879,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     except Exception as e:
         logger.error(f"WebSocket error | session={session_id}: {e}", exc_info=True)
     finally:
+        ws_closed = True
         agent._stop = True
         agent_task.cancel()
         heartbeat_task.cancel()

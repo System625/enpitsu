@@ -28,9 +28,12 @@ COMIC_TOOLS = [
                         "visual_description": types.Schema(
                             type=types.Type.STRING,
                             description=(
-                                "Detailed visual description of the panel: setting, characters, "
-                                "action, lighting, composition, camera angle. Include any speech "
-                                "bubbles or dialogue as part of the visual description."
+                                "Detailed visual description of the panel. MUST include: "
+                                "1) Full character appearance every time (hair color/style, skin tone, "
+                                "clothing with colors, body type — repeat for EVERY panel). "
+                                "2) Setting/background details (same across all panels in a scene). "
+                                "3) Action/pose. 4) Camera angle. 5) Lighting. "
+                                "Include speech bubbles if needed. Be specific and consistent."
                             ),
                         ),
                         "caption": types.Schema(
@@ -67,6 +70,71 @@ COMIC_TOOLS = [
                         ),
                     },
                     required=["panel_number", "new_description", "new_caption"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="update_specific_line",
+                description=(
+                    "Update a specific line or passage in the story text. "
+                    "Use when the user asks to change dialogue, fix a typo, "
+                    "rewrite a sentence, or tweak any part of the story."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "old_text": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "The exact text snippet to find and replace. "
+                                "Must match the current story text exactly."
+                            ),
+                        ),
+                        "new_text": types.Schema(
+                            type=types.Type.STRING,
+                            description="The replacement text to insert.",
+                        ),
+                    },
+                    required=["old_text", "new_text"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="play_music_during_wait",
+                description=(
+                    "Play background music while panels are being generated. "
+                    "Call this BEFORE generating panels to set the mood."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "music_type": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "Type of ambient music: 'epic' for action scenes, "
+                                "'calm' for peaceful scenes, 'suspense' for tension, "
+                                "'happy' for cheerful moments, 'sad' for emotional scenes."
+                            ),
+                        ),
+                    },
+                    required=["music_type"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="clear_all_panels",
+                description=(
+                    "Delete ALL existing panels so you can start fresh. "
+                    "Use when the user doesn't like the current panels and wants to redo them, "
+                    "or says things like 'start over', 'redo all panels', 'clear everything', "
+                    "'I don't like these', 'try again from scratch'."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "reason": types.Schema(
+                            type=types.Type.STRING,
+                            description="Brief reason for clearing (e.g. 'user wants different style').",
+                        ),
+                    },
+                    required=["reason"],
                 ),
             ),
         ]
@@ -138,6 +206,20 @@ class GeminiAgent:
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
                 )
+            ),
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=False,
+                    # LOW = less eager to declare "user started talking"
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    # LOW = waits longer before declaring "user stopped talking"
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    # Wait 500ms of confirmed speech before committing start-of-speech
+                    prefix_padding_ms=500,
+                    # Wait 2000ms of silence before ending the user's turn —
+                    # gives the user time to pause mid-sentence without being cut off
+                    silence_duration_ms=2000,
+                ),
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -228,6 +310,10 @@ class GeminiAgent:
                 self._session_ready.clear()
                 logger.info("Gemini Live session closed.")
 
+    async def wait_until_ready(self, timeout: float = 15.0):
+        """Wait until the Gemini Live session is open and ready to receive input."""
+        await asyncio.wait_for(self._session_ready.wait(), timeout=timeout)
+
     async def send_audio(self, audio_data: bytes):
         """Enqueue raw PCM audio chunk (16-bit signed, 16kHz, mono)."""
         if not self._stop:
@@ -248,16 +334,25 @@ class GeminiAgent:
             await self.text_input_queue.put((text, True))
 
     async def send_tool_response(self, function_call_id: str, function_name: str, response: dict):
-        """Send a tool function response directly back to the active session."""
+        """Send a single tool function response back to the active session."""
+        await self.send_tool_responses_batch([(function_call_id, function_name, response)])
+
+    async def send_tool_responses_batch(self, responses: list[tuple[str, str, dict]]):
+        """
+        Send multiple tool function responses in a single call.
+        Gemini Live expects all responses for a tool_call batch to arrive together.
+        responses: list of (function_call_id, function_name, response_dict)
+        """
         if self._session and self._session_ready.is_set():
             try:
                 await self._session.send_tool_response(  # type: ignore[attr-defined]
                     function_responses=[
                         types.FunctionResponse(
-                            id=function_call_id,
-                            name=function_name,
-                            response=response,
+                            id=call_id,
+                            name=name,
+                            response=resp,
                         )
+                        for call_id, name, resp in responses
                     ]
                 )
             except Exception as e:
@@ -268,24 +363,83 @@ class GeminiAgent:
     def get_system_instruction(self, story_text: str) -> str:
         """Constructs the Creative Director system prompt with the story injected."""
         return f"""You are Enpitsu, a professional Comic Book Creative Director and AI Co-Creator.
-Your goal is to help the user turn their story into a stunning comic book through real-time collaboration.
+You help users turn their stories into stunning comic books through real-time voice conversation.
 
 STORY TEXT:
 {story_text}
 
-YOUR RESPONSIBILITIES:
-1. Act as a warm, creative collaborator. Use a friendly, professional tone.
-2. Respond to the user's voice and text input in real-time. Follow their creative direction.
-3. Think in PAGES, not individual panels. Each comic page has 4-6 panels. When generating panels for a scene, call generate_comic_panel() 4-6 times in a row to fill a full page. Vary the compositions:
-   - Panel 1: Wide establishing shot (setting, atmosphere)
-   - Panels 2-4: Mid-shots and close-ups (dialogue, character reactions, action beats)
-   - Panel 5-6: Action shot or cliffhanger that leads to the next page
-4. Include speech bubbles and dialogue directly in the visual_description so they are rendered INTO the image (e.g., "speech bubble saying 'Run!'"). The caption field is just a short metadata summary.
-5. When the user asks to change or edit an existing panel, call the edit_existing_panel() tool.
-6. Keep responses SHORT and action-oriented. Bias toward generating panels, not talking about them.
-7. When the user says "generate", "start", "make panels", "illustrate" — IMMEDIATELY call generate_comic_panel() multiple times. Do NOT ask clarifying questions first.
-8. When the user changes the art style, acknowledge in 1 sentence. Do NOT regenerate panels just because style changed.
-9. Only call generate_comic_panel() when the user EXPLICITLY asks to generate or create panels.
+HOW YOU COMMUNICATE:
+- You are a LISTENER first. Always let the user finish speaking before you respond.
+- Speak in short, natural sentences — like a friend, not a robot.
+- ALWAYS acknowledge what the user just said before moving on: "Love that!", "Great idea!", "Got it, so you want..."
+- If anything is unclear, ASK a short clarifying question and WAIT for the answer. Do NOT guess.
+- After you act, invite feedback: "How does that look?" or "Want me to change anything?"
+- Keep your spoken responses to 2-3 sentences max unless the user asks for more detail.
+- You're having a real conversation. Never rush. Never talk over the user.
 
-IMPORTANT: You will receive audio from the user. Listen carefully, acknowledge briefly, then ACT (generate panels).
+CONVERSATION FLOW — follow this order:
+1. LISTEN to the user's full message
+2. ACKNOWLEDGE what they said (reference their words)
+3. DECIDE: Do you need to clarify anything? If yes → ASK and WAIT. If no → proceed
+4. ACT: generate panels, edit panels, or discuss
+
+VISUAL CONSISTENCY — THIS IS CRITICAL:
+Before generating ANY panels, mentally define a CHARACTER REFERENCE for each character:
+- Name, age, body type, hair (color, length, style), skin tone, eye color
+- Outfit: exact clothing, colors, accessories
+- Distinguishing features: scars, glasses, tattoos, etc.
+
+Then REPEAT these exact details in EVERY panel's visual_description. For example:
+- GOOD: "Tate, a 16-year-old lean boy with short curly black hair, brown skin, wearing a blue #10 soccer jersey and white shorts, kicks the ball"
+- BAD: "A boy kicks the ball" (too vague — will look like a different character each time)
+
+ALSO keep the SETTING consistent:
+- Same location details across panels (e.g., "green soccer field with red bleachers in background")
+- Same time of day / lighting (e.g., "afternoon sunlight, warm golden tones")
+- Same sport, same activity — do NOT switch sports or settings mid-scene
+
+Every visual_description MUST include:
+1. Full character appearance description (EVERY time, even if repeated)
+2. Setting/background details
+3. The specific action or pose
+4. Camera angle (wide shot, close-up, mid-shot, etc.)
+
+WHEN TO GENERATE PANELS:
+- ONLY generate panels when the user gives a clear, explicit instruction like "generate", "start", "make panels", "create the first page", "illustrate this scene", "draw it"
+- Before generating, briefly confirm what you'll create: "Alright, I'll draw 6 panels for the opening scene with..."
+- CRITICAL: Call generate_comic_panel() EXACTLY 6 times in a SINGLE response. Do NOT call it once, wait for a response, then call it again. ALL 6 calls must be in ONE tool_call batch.
+- Do NOT speak or ask questions between panel generations. Generate all 6, THEN speak.
+- Vary compositions across the 6 panels:
+  • Panel 1: Wide establishing shot
+  • Panels 2-4: Mid-shots, close-ups, dialogue beats
+  • Panels 5-6: Action or cliffhanger
+- Include speech bubbles in the visual_description (e.g., "speech bubble saying 'Run!'")
+- The caption field is short metadata only (max 12 words)
+- NEVER change the sport, activity, or character appearance between panels in the same scene
+- After ALL 6 panels are generated, THEN ask the user what they think
+
+WHEN NOT TO GENERATE PANELS:
+- When the user is just chatting, asking questions, or discussing the story
+- When the user changes art style — just acknowledge it in one sentence
+- When you're unsure what the user wants — ask first
+
+STORY TEXT EDITING:
+- When the user wants to change dialogue, fix wording, or rewrite part of the story, use update_specific_line().
+- The old_text must be an EXACT match of what's currently in the story.
+- After updating, briefly confirm what you changed.
+
+BACKGROUND MUSIC:
+- Before generating panels, call play_music_during_wait() to set the mood.
+- Pick the music_type that matches the scene: 'epic', 'calm', 'suspense', 'happy', or 'sad'.
+- Call it ONCE before the batch of generate_comic_panel() calls — not between panels.
+
+EDITING & REDOING PANELS:
+- To change ONE panel: use edit_existing_panel() with the panel number
+  Example: user says "change panel 3" or "make panel 2 darker"
+- To redo ALL panels: first call clear_all_panels(), then generate new ones with generate_comic_panel()
+  Example: user says "I don't like these", "start over", "redo everything", "try again"
+- When the user expresses dissatisfaction with the panels, ASK if they want to edit specific panels or redo all of them
+- After clearing, immediately generate new panels based on the user's feedback
+
+IMPORTANT: This is a CONVERSATION. The user wants to collaborate with you, not just give you orders. Be curious about their vision. Ask about their characters, their favorite scenes, what mood they want. Make them feel heard.
 """

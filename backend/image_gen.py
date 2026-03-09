@@ -60,11 +60,14 @@ class ImageGenerator:
             if response.generated_images:
                 img = response.generated_images[0].image
                 if img is None or img.image_bytes is None:
-                    logger.warning("Imagen returned image with no bytes.")
+                    logger.warning("Imagen returned image with no bytes — likely safety-filtered.")
                     return None
                 return base64.b64encode(img.image_bytes).decode("utf-8")
 
-            logger.warning("Imagen returned no images.")
+            # Log filtering details if available
+            if hasattr(response, "filtered_reason"):
+                logger.warning(f"Imagen filtered: {response.filtered_reason}")
+            logger.warning(f"Imagen returned no images for prompt: {enhanced_prompt[:120]}")
             return None
 
         except Exception as e:

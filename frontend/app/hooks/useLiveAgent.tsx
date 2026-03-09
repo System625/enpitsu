@@ -12,10 +12,10 @@ let _activeSources: AudioBufferSourceNode[] = [];
 
 function clearPcmQueue(): void {
   _nextPlayTime = 0;
-  for (const src of _activeSources) {
+  const toStop = _activeSources.splice(0);
+  for (const src of toStop) {
     try { src.stop(); } catch { /* already stopped */ }
   }
-  _activeSources = [];
 }
 
 function playPcmChunk(base64Data: string, mimeType: string, audioCtx: AudioContext, analyser: AnalyserNode | null): void {
@@ -70,6 +70,11 @@ export interface ComicPanel {
 
 export type MicMode = "push-to-talk" | "open-mic";
 
+export interface LineUpdate {
+  old: string;
+  new: string;
+}
+
 interface LiveAgentContextType {
   agentState: AgentState;
   panels: ComicPanel[];
@@ -80,6 +85,8 @@ interface LiveAgentContextType {
   projectName: string;
   currentProjectId: string;
   storyLoaded: boolean;
+  storyText: string;
+  pendingHighlight: LineUpdate | null;
   connectionStatus: "connected" | "reconnecting" | "disconnected" | null;
   micMode: MicMode;
   isMuted: boolean;
@@ -116,8 +123,13 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   );
 
   const [storyLoaded, setStoryLoaded] = useState(false);
+  const [storyText, setStoryText] = useState("");
+  const [pendingHighlight, setPendingHighlight] = useState<LineUpdate | null>(null);
   const [micMode, setMicMode] = useState<MicMode>("push-to-talk");
   const [isMuted, setIsMuted] = useState(false);
+
+  // Music refs for play_music tool
+  const bgMusicRef = useRef<HTMLAudioElement | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -130,31 +142,40 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const reconnectAttemptsRef = useRef<number>(0);
   const [connectionStatus, setConnectionStatus] = useState<"connected" | "reconnecting" | "disconnected" | null>(null);
 
-  // Background music during "thinking" state
+  // Background music during "thinking" state OR while panels are loading
   const thinkingMusicRef = useRef<HTMLAudioElement | null>(null);
+  const hasLoadingPanels = panels.some(p => p.loading);
+  const shouldPlayMusic = agentState === "thinking" || hasLoadingPanels;
+
   useEffect(() => {
-    if (agentState === "thinking") {
+    if (shouldPlayMusic) {
       if (!thinkingMusicRef.current) {
-        thinkingMusicRef.current = new Audio("/thinking-music.mp3");
+        thinkingMusicRef.current = new Audio("/thinking-music.wav");
         thinkingMusicRef.current.loop = true;
         thinkingMusicRef.current.volume = 0;
       }
       const music = thinkingMusicRef.current;
-      music.play().catch(() => {});
-      // Fade in
-      let vol = 0;
+      console.debug("[music] shouldPlayMusic=true, playing. paused:", music.paused, "vol:", music.volume);
+      music.play().then(() => {
+        console.debug("[music] play() succeeded");
+      }).catch((e) => {
+        console.warn("[music] play() blocked:", e.message);
+      });
+      // Fade in to 0.4 (audible)
+      let vol = music.volume;
       const fadeIn = setInterval(() => {
-        vol = Math.min(vol + 0.02, 0.15);
+        vol = Math.min(vol + 0.03, 0.4);
         music.volume = vol;
-        if (vol >= 0.15) clearInterval(fadeIn);
+        if (vol >= 0.4) clearInterval(fadeIn);
       }, 50);
       return () => clearInterval(fadeIn);
     } else if (thinkingMusicRef.current) {
       const music = thinkingMusicRef.current;
+      console.debug("[music] shouldPlayMusic=false, fading out");
       // Fade out
       let vol = music.volume;
       const fadeOut = setInterval(() => {
-        vol = Math.max(vol - 0.02, 0);
+        vol = Math.max(vol - 0.03, 0);
         music.volume = vol;
         if (vol <= 0) {
           clearInterval(fadeOut);
@@ -164,7 +185,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       }, 50);
       return () => clearInterval(fadeOut);
     }
-  }, [agentState]);
+  }, [shouldPlayMusic]);
 
   const connectWebSocket = useCallback(async (sessionId: string) => {
     const wsUrl = BACKEND_URL.replace(/^http/, "ws");
@@ -178,12 +199,11 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     const ws = new WebSocket(`${wsUrl}/ws/session/${sessionId}${tokenParam}`);
     wsRef.current = ws;
     sessionIdRef.current = sessionId;
-    // Close and discard any previous AudioContext so chunks don't pile up across sessions
-    audioContextRef.current?.close().catch(() => {});
-    audioContextRef.current = null;
+    // Reset playback state but KEEP the AudioContext if it's already running —
+    // closing it would require a new user gesture to resume (autoplay policy).
     playbackAnalyserRef.current = null;
     setAudioAnalyser(null);
-    clearPcmQueue();
+    clearPcmQueue(); // also resets _nextPlayTime
 
     ws.onopen = () => {
       console.log("WebSocket connected for session:", sessionId);
@@ -194,13 +214,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       if (currentStyle) {
         ws.send(JSON.stringify({ type: "style_update", style: currentStyle }));
       }
-      // Send greeting prompt only on first connect, not on reconnects
-      if (isFirstConnect) {
-        ws.send(JSON.stringify({
-          type: "user_message",
-          text: "[System: The user just uploaded their story. Greet them warmly, introduce yourself as Enpitsu their comic co-creator, and ask what style or scene they'd like to start with. Keep it to 2 sentences max.]",
-        }));
-      }
+      // Session is active — show "listening" state (agent is ready for conversation)
+      setAgentState("thinking"); // will switch to speaking/listening when greeting arrives
     };
 
     ws.onmessage = (event) => {
@@ -212,6 +227,46 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
         // Clear thinking timeout on any response from backend
         if (thinkingTimerRef.current) { clearTimeout(thinkingTimerRef.current); thinkingTimerRef.current = null; }
+
+        // Story text pushed from backend on connect
+        if (msg.type === "push_story") {
+          setStoryText(msg.text ?? "");
+        }
+
+        // Gemini updated a line in the story
+        if (msg.type === "update_line") {
+          setStoryText(prev => {
+            if (msg.old && prev.includes(msg.old)) {
+              return prev.replace(msg.old, msg.new);
+            }
+            return prev;
+          });
+          setPendingHighlight({ old: msg.old, new: msg.new });
+          // Clear highlight after editor has had time to flash it
+          setTimeout(() => setPendingHighlight(null), 4000);
+        }
+
+        // Background music control from Gemini
+        if (msg.type === "play_music") {
+          try {
+            if (!bgMusicRef.current) {
+              bgMusicRef.current = new Audio("/thinking-music.wav");
+              bgMusicRef.current.loop = true;
+            }
+            bgMusicRef.current.volume = 0.3;
+            bgMusicRef.current.play().catch(() => {});
+            console.debug("[music] play_music tool:", msg.music_type);
+          } catch (e) {
+            console.warn("[music] play error:", e);
+          }
+        }
+
+        if (msg.type === "stop_music") {
+          if (bgMusicRef.current) {
+            bgMusicRef.current.pause();
+            bgMusicRef.current.currentTime = 0;
+          }
+        }
 
         if (msg.type === "panel_loading") {
           // Add a loading skeleton — deduplicate in case backend reconnects and resends
@@ -250,10 +305,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (msg.type === "agent_response") {
-          // PCM audio from Gemini drives actual playback — this is just a transcript notification
+          // Transcript notification — PCM audio drives actual playback timing
           setAgentState("speaking");
-          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
-          speakingTimerRef.current = setTimeout(() => setAgentState("idle"), 12000);
         }
 
         if (msg.type === "interrupted") {
@@ -265,7 +318,13 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (msg.type === "agent_audio") {
+          // Agent is speaking — stop background music
+          if (bgMusicRef.current && !bgMusicRef.current.paused) {
+            bgMusicRef.current.pause();
+            bgMusicRef.current.currentTime = 0;
+          }
           setAgentState("speaking");
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
           if (msg.audio) {
             // Lazily create AudioContext on first audio message (avoids autoplay policy issues)
             if (!audioContextRef.current) {
@@ -282,23 +341,29 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
               setAudioAnalyser(playbackAnalyserRef.current);
             }
             playPcmChunk(msg.audio, msg.mime_type ?? "audio/pcm;rate=24000", ctx, playbackAnalyserRef.current);
+            // After audio finishes playing, go to "listening" (not idle) —
+            // the session is still active, agent is waiting for the user's next turn
+            speakingTimerRef.current = setTimeout(
+              () => setAgentState("listening"),
+              Math.max(0, (_nextPlayTime - ctx.currentTime) * 1000) + 300,
+            );
           }
         }
 
         if (msg.type === "status_update") {
           if (msg.status === "generating" || msg.status === "thinking") {
             setAgentState("thinking");
-          } else if (msg.status === "idle") {
-            setAgentState("idle");
           }
+          // Ignore "idle" from backend — we use audio playback state to
+          // drive UI transitions (speaking → listening). The agent stays
+          // in "listening" between turns, never "idle" during a session.
         }
 
-        // Panel editing: replace an existing panel by panel_number
+        // Panel editing: replace an existing panel by panel_number (1-based)
         if (msg.type === "panel_updated") {
-          setPanels(prev => prev.map(p => {
-            // Match by panel_number encoded in the id, or by index
-            const match = p.id.includes(`panel_${msg.panel_number}`) || p.index === msg.panel_number;
-            if (match) {
+          const targetIndex = msg.panel_number - 1; // Convert 1-based to 0-based
+          setPanels(prev => prev.map((p, i) => {
+            if (i === targetIndex) {
               return {
                 ...p,
                 imageUrl: `data:image/jpeg;base64,${msg.image}`,
@@ -308,6 +373,11 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
             }
             return p;
           }));
+        }
+
+        // Clear all panels — user wants to start fresh
+        if (msg.type === "panels_cleared") {
+          setPanels([]);
         }
 
         // Panel generation failed — remove loading skeleton
@@ -355,6 +425,12 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         thinkingMusicRef.current.pause();
         thinkingMusicRef.current.src = "";
         thinkingMusicRef.current = null;
+      }
+      // Dispose background music on unmount
+      if (bgMusicRef.current) {
+        bgMusicRef.current.pause();
+        bgMusicRef.current.src = "";
+        bgMusicRef.current = null;
       }
       clearPcmQueue();
     };
@@ -415,9 +491,9 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 
     setAgentState("thinking");
 
-    // Safety timeout: if backend doesn't respond in 30s, reset to idle
+    // Safety timeout: if backend doesn't respond in 30s, go back to listening
     if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
-    thinkingTimerRef.current = setTimeout(() => setAgentState("idle"), 30000);
+    thinkingTimerRef.current = setTimeout(() => setAgentState("listening"), 30000);
 
     if (text) {
       // Text input path (typed prompt or SpeechRecognition fallback)
@@ -434,6 +510,28 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
     setAgentState("thinking");
     const nameFromFile = file.name.replace(/\.[^.]+$/, "");
     setProjectName(nameFromFile);
+
+    // Pre-create the AudioContext during this user gesture (click/drop) so
+    // the browser allows audio playback for the greeting. If we wait until
+    // the first agent_audio message, the AudioContext starts suspended and
+    // autoplay policy blocks it.
+    if (!audioContextRef.current) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+      audioContextRef.current = new AudioCtx();
+    }
+    if (audioContextRef.current.state === "suspended") {
+      audioContextRef.current.resume().catch(() => {});
+    }
+
+    // Pre-create thinking music during user gesture to bypass autoplay policy
+    if (!thinkingMusicRef.current) {
+      thinkingMusicRef.current = new Audio("/thinking-music.wav");
+      thinkingMusicRef.current.loop = true;
+      thinkingMusicRef.current.volume = 0;
+    }
+    // Unlock audio element with a silent play during user gesture
+    thinkingMusicRef.current.play().catch(() => {});
 
     try {
       const formData = new FormData();
@@ -457,9 +555,6 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
       setStoryLoaded(true);
 
       connectWebSocket(session_id);
-
-      // Let the Gemini agent greet the user with its own voice (not browser TTS).
-      // We send a nudge text after the WebSocket connects so the agent speaks first.
       setAgentState("thinking");
     } catch (err) {
       console.error("Upload error:", err);
@@ -638,6 +733,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
         projectName,
         currentProjectId,
         storyLoaded,
+        storyText,
+        pendingHighlight,
         connectionStatus,
         micMode,
         isMuted,
