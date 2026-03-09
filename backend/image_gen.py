@@ -65,8 +65,9 @@ class ImageGenerator:
                 return base64.b64encode(img.image_bytes).decode("utf-8")
 
             # Log filtering details if available
-            if hasattr(response, "filtered_reason"):
-                logger.warning(f"Imagen filtered: {response.filtered_reason}")
+            filtered_reason = getattr(response, "filtered_reason", None)
+            if filtered_reason:
+                logger.warning(f"Imagen filtered: {filtered_reason}")
             logger.warning(f"Imagen returned no images for prompt: {enhanced_prompt[:120]}")
             return None
 
