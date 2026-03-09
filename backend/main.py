@@ -405,7 +405,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     pending_tool_responses: list[tuple[str, str, dict]] = []
     tool_generation_tasks: list[asyncio.Task] = []
     tool_batch_timer: list[Optional[asyncio.Task]] = [None]  # mutable container
-    expected_panel_count: list[int] = [6]  # how many panels we expect per batch
 
     async def _flush_tool_responses():
         """Send all accumulated tool responses to Gemini at once."""
