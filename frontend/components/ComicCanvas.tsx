@@ -84,11 +84,7 @@ export function ComicCanvas() {
           {panels.map((panel) => (
             <div
               key={panel.id}
-              className={
-                currentStyle === "american" && panel.index % 5 === 0
-                  ? "col-span-1 md:col-span-2 lg:col-span-3 aspect-video md:aspect-auto"
-                  : ""
-              }
+              className=""
             >
               <ComicPanel panel={panel} />
             </div>

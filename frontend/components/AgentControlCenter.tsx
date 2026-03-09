@@ -6,8 +6,12 @@ import { AgentVisualizer } from "./AgentVisualizer";
 import { StyleSelector } from "./StyleSelector";
 import { FileDropzone } from "./FileDropzone";
 import { PromptInput } from "./PromptInput";
+import { StoryEditor } from "./StoryEditor";
+import { useLiveAgent } from "@/app/hooks/useLiveAgent";
 
 export function AgentControlCenter() {
+  const { storyText, pendingHighlight } = useLiveAgent();
+
   return (
     <aside className="h-full w-full max-w-[320px] flex flex-col gap-5 p-5 overflow-y-auto bg-skeuo-sidebar border-r border-skeuo-border bg-noise backdrop-blur-xl">
       {/* Brand header */}
@@ -33,6 +37,10 @@ export function AgentControlCenter() {
       <PromptInput />
       <PushToTalkButton />
       <FileDropzone />
+      <StoryEditor
+        storyText={storyText}
+        pendingHighlight={pendingHighlight}
+      />
       <StyleSelector />
     </aside>
   );

@@ -17,7 +17,13 @@ export function PushToTalkButton() {
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+  const vadAnalyserRef = useRef<AnalyserNode | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const vadFrameRef = useRef<number | null>(null);
   const [liveText, setLiveText] = useState("");
+
+  const SILENCE_THRESHOLD = 0.01; // RMS below this = silence
+  const SILENCE_DELAY_MS = 1500;  // send turn_complete after 1.5s silence
 
   const isInterruptable = agentState === "speaking" || agentState === "thinking";
 
@@ -50,9 +56,10 @@ export function PushToTalkButton() {
       gain.gain.value = isMuted ? 0 : 1;
       gainRef.current = gain;
 
-      // Create analyser for mic input visualization
+      // Create analyser for mic input visualization + VAD
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
+      vadAnalyserRef.current = analyser;
 
       // Chain: source -> gain -> analyser -> worklet
       source.connect(gain);
@@ -71,6 +78,10 @@ export function PushToTalkButton() {
   }, [sendAudioChunk, setAudioAnalyser, startRecording, isMuted]);
 
   const stopMic = useCallback(() => {
+    // Stop VAD loop
+    if (vadFrameRef.current) { cancelAnimationFrame(vadFrameRef.current); vadFrameRef.current = null; }
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    vadAnalyserRef.current = null;
     sourceRef.current?.disconnect();
     sourceRef.current = null;
     gainRef.current?.disconnect();
@@ -85,6 +96,42 @@ export function PushToTalkButton() {
     setAudioAnalyser(null);
   }, [setAudioAnalyser]);
 
+  // VAD loop for open-mic mode — sends audio_turn_complete after sustained silence
+  // Only fires turn_complete if the user actually spoke since the last turn_complete.
+  const userSpokeRef = useRef(false);
+
+  const startVad = useCallback(() => {
+    const analyser = vadAnalyserRef.current;
+    if (!analyser) return;
+    const buf = new Float32Array(analyser.fftSize);
+    userSpokeRef.current = false;
+
+    const tick = () => {
+      if (!vadAnalyserRef.current) return;
+      analyser.getFloatTimeDomainData(buf);
+      const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
+
+      if (rms > SILENCE_THRESHOLD) {
+        // User is speaking — mark it and cancel any pending silence timer
+        userSpokeRef.current = true;
+        if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+      } else if (userSpokeRef.current && !silenceTimerRef.current) {
+        // Silence after speech — start timer to end the turn
+        silenceTimerRef.current = setTimeout(() => {
+          silenceTimerRef.current = null;
+          userSpokeRef.current = false;
+          // Signal end of user's turn to Gemini
+          stopRecording(undefined);
+          // Resume listening for the next utterance
+          setTimeout(() => startRecording(), 100);
+        }, SILENCE_DELAY_MS);
+      }
+      // If user never spoke, do nothing (don't spam turn_complete)
+      vadFrameRef.current = requestAnimationFrame(tick);
+    };
+    vadFrameRef.current = requestAnimationFrame(tick);
+  }, [stopRecording, startRecording]);
+
   // Update gain when muted state changes (open mic mode)
   useEffect(() => {
     if (gainRef.current) {
@@ -92,7 +139,10 @@ export function PushToTalkButton() {
     }
   }, [isMuted]);
 
-  // Open mic: auto-start when WebSocket is connected, auto-stop when mode changes
+  // Open mic: auto-start when WebSocket is connected, auto-stop when mode changes.
+  // In open-mic mode, Gemini's server-side VAD handles turn detection
+  // (silence_duration_ms=2000), so we do NOT run client-side VAD or
+  // send audio_turn_complete — just stream audio continuously.
   useEffect(() => {
     if (micMode !== "open-mic" || !storyLoaded) return;
 
@@ -105,11 +155,7 @@ export function PushToTalkButton() {
 
     return () => {
       cancelled = true;
-      // Stop mic when leaving open-mic mode
-      if (micMode !== "open-mic") {
-        stopMic();
-        stopRecording(undefined);
-      }
+      stopMic();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [micMode, storyLoaded]);
