@@ -7,17 +7,10 @@ import { motion } from "framer-motion";
 
 export function AgentVisualizer() {
   const { agentState } = useLiveAgent();
-  const rawAudioData = useAudioVisualizer();
+  const rawAudioVolume = useAudioVisualizer(); // 0 to 255 from LiveKit
 
-  const audioData = useMemo(() => {
-    if (agentState === "speaking" || agentState === "listening") {
-      return rawAudioData;
-    }
-    return new Uint8Array(0);
-  }, [agentState, rawAudioData]);
-
-  const averageVolume = audioData.length > 0
-    ? audioData.reduce((acc: number, val: number) => acc + val, 0) / audioData.length
+  const averageVolume = (agentState === "speaking" || agentState === "listening")
+    ? rawAudioVolume
     : 0;
 
   const scale = agentState === "speaking" ? 1 + (averageVolume / 255) * 0.5 : 1;

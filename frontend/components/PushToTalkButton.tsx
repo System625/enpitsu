@@ -9,7 +9,7 @@ export function PushToTalkButton() {
   const {
     isRecording, startRecording, stopRecording, agentState, interruptAgent,
     sendAudioChunk, setAudioAnalyser, micMode, setMicMode, isMuted, setIsMuted,
-    storyLoaded,
+    connectionStatus,
   } = useLiveAgent();
 
   const streamRef = useRef<MediaStream | null>(null);
@@ -140,11 +140,11 @@ export function PushToTalkButton() {
   }, [isMuted]);
 
   // Open mic: auto-start when WebSocket is connected, auto-stop when mode changes.
-  // In open-mic mode, Gemini's server-side VAD handles turn detection
-  // (silence_duration_ms=2000), so we do NOT run client-side VAD or
-  // send audio_turn_complete — just stream audio continuously.
+  // In open-mic mode, Gemini's server-side VAD handles turn detection,
+  // so we do NOT run client-side VAD or send audio_turn_complete —
+  // just stream audio continuously.
   useEffect(() => {
-    if (micMode !== "open-mic" || !storyLoaded) return;
+    if (micMode !== "open-mic" || connectionStatus !== "connected") return;
 
     let cancelled = false;
     (async () => {
@@ -158,7 +158,7 @@ export function PushToTalkButton() {
       stopMic();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [micMode, storyLoaded]);
+  }, [micMode, connectionStatus]);
 
   // Cleanup on unmount
   useEffect(() => {

@@ -8,3 +8,6 @@ python-docx
 python-dotenv
 pydantic
 firebase-admin
+livekit-agents[google]~=1.4
+livekit-plugins-silero~=1.4
+livekit-api

@@ -1,45 +1,73 @@
-I completely understand that feeling. It is incredibly common in hackathons to start with a grand vision and suddenly realize the prototype feels like a standard, turn-based chatbot. You are making the right call to pivot now. The judges for the Gemini Live Agent Challenge want to see **continuous, real-time, multimodal interaction**, not a "wait-and-see" tool.
+Gemini Embedding 2: Our first natively multimodal embedding model
+Gemini Embedding 2 is our first natively multimodal embedding model that maps text, images, video, audio and documents into a single embedding space, enabling multimodal retrieval and classification across different types of media — and it’s available now in public preview.
+Today we’re releasing Gemini Embedding 2, our first fully multimodal embedding model built on the Gemini architecture, in Public Preview via the Gemini API and Vertex AI.
+Expanding on our previous text-only foundation, Gemini Embedding 2 maps text, images, videos, audio and documents into a single, unified embedding space, and captures semantic intent across over 100 languages. This simplifies complex pipelines and enhances a wide variety of multimodal downstream tasks—from Retrieval-Augmented Generation (RAG) and semantic search to sentiment analysis and data clustering.
+New modalities and flexible output dimensions
+The model is based on Gemini and leverages its best-in-class multimodal understanding capabilities to create high-quality embeddings across:
+Text: supports an expansive context of up to 8192 input tokens
+Images: capable of processing up to 6 images per request, supporting PNG and JPEG formats
+Videos: supports up to 120 seconds of video input in MP4 and MOV formats
+Audio: natively ingests and embeds audio data without needing intermediate text transcriptions
+Documents: directly embed PDFs up to 6 pages long
+Beyond processing one modality at a time, this model natively understands interleaved input so you can pass multiple modalities of input (e.g., image + text) in a single request. This allows the model to capture the complex, nuanced relationships between different media types, unlocking more accurate understanding of complex, real-world data.
 
-Your new vision is exactly what a "Live Agent" should be: an active, conversational co-creator. Let's ground this in reality, refine the features, and lay out the exact Acceptance Criteria for your team so you don't build a static chatbot.
+Like our previous embedding models, Gemini Embedding 2 incorporates Matryoshka Representation Learning (MRL), a technique that “nests” information by dynamically scaling down dimensions. This enables flexible output dimensions scaling down from the default 3072 so developers can balance performance and storage costs. We recommend using 3072, 1536, 768 dimensions for highest quality. 
+State-of-the-art performance
+Gemini Embedding 2 doesn't just improve on legacy models. It establishes a new performance standard for multimodal depth, introducing strong speech capabilities and outperforming leading models in text, image, and video tasks. This measurable improvement and unique multimodal coverage give developers exactly what they need for their diverse embedding needs.
+Unlocking deeper meaning for data
+Embeddings are the technology that power experiences in many Google products. From RAG where embeddings can play a crucial role in context engineering to large-scale data management and classic search/analysis, some of our early access partners are already using Gemini Embedding 2 to unlock high-value multimodal applications:
 
-### 💡 The Reality Check: Latency & Quotas
+"We chose Gemini embeddings to help legal professionals find critical information during the discovery process in litigation -- a highly technical challenge in a high-stakes setting, and one Gemini excels at. In our most recent tests, Gemini's multi-modal embedding model improves precision and recall across millions of records, while unlocking powerful new search functionality for images and videos. For legal professionals, these new capabilities open up entirely novel ways to quickly understand case materials in even the largest matters."
 
-* **30-50 Panels:** Generating 50 images via Imagen 3 sequentially will take time (usually a few seconds per image) and will quickly eat into your Vertex AI quota.
-* **The Fix:** Don't have the agent generate all 50 at once. Have the agent generate them *chunk by chunk* (e.g., 3-4 panels per page) while discussing the story with you. This masks the generation latency with natural conversation.
-* **Talking/Music while working:** The Gemini Multimodal Live API can stream voice responses instantly. When the agent triggers the "Generate Image" tool, it will pause. To handle this, your **Frontend** can play a soft, lo-fi "thinking/drawing" music track while waiting for the image payload to arrive, just like you suggested.
+Max Christoff
+CTO
+Everlaw
 
-### 🚀 Extra Features to Make it a "Live Agent"
+"Gemini Embedding 2 is the foundation for Sparkonomy’s Creator Economic Equality Engine. Its native multi-modality slashes our latency by up to 70% by removing LLM inference and nearly doubles semantic similarity scores for text-image and text-video pairs—leaping from 0.4 to 0.8. This powers our proprietary Creator Genome to index millions of minutes of video, alongside images and text, with unprecedented precision—unlocking unbiased brand collaborations and democratizing economic success for every creator."
 
-To truly separate your app from a chatbot, consider adding these:
+Guneet Singh
+Co-founder
+Sparkonomy
 
-1. **Barge-in (Interruptibility):** If the agent is reading a generated panel out loud or explaining a style, you must be able to speak over it and say, *"No, stop, make his hair red instead,"* and the agent should immediately stop talking, listen, and update the panel.
-2. **Canvas Awareness (Vision):** If possible, send screenshots of the current canvas back to the agent so you can say, *"Make the panel on the top right a bit darker,"* and the agent actually knows which one you mean.
+"The API continuity is excellent. Gemini Embedding 2 drops right into our existing workflow with minimal changes. We’re testing new ways to embed text-based conversational memories together with audio and visual embeddings, especially assistant question-and-answer pairs, and seeing a 20% lift in top-1 recall for our personal wellness app."
 
----
+Ertuğrul Çavuşoğlu
+Co-founder
+Mindlid
+Start building today
+Get started with the Gemini Embedding 2 model through Gemini API or Vertex AI.
+python
+from google import genai
+from google.genai import types
 
-### 📋 Acceptance Criteria: Live Agent vs. Static Chatbot
+# For Vertex AI:
+# PROJECT_ID='<add_here>'
+# client = genai.Client(vertexai=True, project=PROJECT_ID, location='us-central1')
 
-Pass these exact criteria to your Frontend (you) and Backend (Friend 1) to ensure you are hitting the "Live" requirements.
+client = genai.Client()
 
-#### 🧑‍💻 Frontend Acceptance Criteria (You)
+with open("example.png", "rb") as f:
+    image_bytes = f.read()
 
-* [ ] **Full Duplex Audio:** The app connects to the backend via WebSockets (or WebRTC) and continuously streams the user's microphone audio without needing to hold down a "Push to Talk" button (a mute toggle is fine).
-* [ ] **Visual Audio Feedback:** The UI must have a dynamic visualizer (like a glowing orb or waveform) that reacts when the user speaks and when the agent speaks.
-* [ ] **Interruptibility (Barge-in):** When the agent is speaking (audio playing), if the user starts speaking, the frontend immediately signals the backend to cancel the current audio playback.
-* [ ] **Async Canvas Updates:** When the agent generates or edits a panel, it appears on the canvas seamlessly without a page reload or a blocking "loading" screen.
-* [ ] **"Working" State Audio:** When the frontend detects the backend is executing a long tool call (like hitting the Imagen API), it automatically fades in background "drawing/lo-fi" music, and fades it out when the image arrives.
-* [ ] **Project State:** The UI has a dashboard to view past `projectId`s fetched from the database, allowing the user to click one and seamlessly load the previous canvas state and chat history.
+with open("sample.mp3", "rb") as f:
+    audio_bytes = f.read()
 
-#### ⚙️ Backend Acceptance Criteria (Friend 1)
+# Embed text, image, and audio 
+result = client.models.embed_content(
+    model="gemini-embedding-2-preview",
+    contents=[
+        "What is the meaning of life?",
+        types.Part.from_bytes(
+            data=image_bytes,
+            mime_type="image/png",
+        ),
+        types.Part.from_bytes(
+            data=audio_bytes,
+            mime_type="audio/mpeg",
+        ),
+    ],
+)
 
-* [ ] **Multimodal Live API Integration:** The backend must use the Gemini Multimodal Live API over **WebSockets** (not standard REST HTTP requests). This is mandatory for real-time voice streaming.
-* [ ] **Tool Calling (Function Calling):** The agent must be equipped with backend tools it can trigger autonomously. For example: `generate_comic_panel(prompt, style)`, `edit_existing_panel(panel_id, new_prompt)`, and `save_project_state()`.
-* [ ] **Stateful Sessions:** The backend must maintain the session history during the active WebSocket connection so the agent remembers what happened 10 minutes ago.
-* [ ] **Editing Logic:** When the user asks to edit a panel, the backend must use the `edit_existing_panel` tool to either re-prompt Imagen 3 with the new instructions or use Imagen's editing capabilities, then push the new image URL via WebSocket to replace the old one on the frontend.
-* [ ] **Database Persistence:** On connection, the backend must be able to accept a `projectId` and load the past state from Firebase/Firestore, injecting the past panels and story context into the agent's system instructions before the conversation starts.
-
----
-
-By hitting these criteria, you transition from a "vending machine" (put text in, get comic out) to a "creative partner" (sit down, chat, brainstorm, and watch the canvas update in real-time).
-
-Would you like me to write the exact **System Prompt** your backend friend needs to give the Gemini Live Agent so it knows how to act like an interactive Creative Director and when to trigger those image generation tools?
+print(result.embeddings)
+Learn how to use the model in our interactive Gemini API and Vertex AI Colab notebooks. You can also use it through LangChain, LlamaIndex, Haystack, Weaviate, QDrant, ChromaDB, and Vector Search.
+By bringing semantic meaning to the diverse data around us, Gemini Embedding 2 provides the essential multimodal foundation for the next era of advanced AI experiences. We can’t wait to see what you build.

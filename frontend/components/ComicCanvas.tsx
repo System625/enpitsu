@@ -6,23 +6,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useState } from "react";
 
 export function ComicCanvas() {
-  const { panels, currentStyle, agentState, projectName, exportProjectAsZip } = useLiveAgent();
+  const { panels, agentState, projectName, exportProjectAsZip } = useLiveAgent();
   const [exporting, setExporting] = useState(false);
-
-  const getGridLayoutClass = () => {
-    switch (currentStyle) {
-      case "manga":
-        return "grid-cols-2 md:grid-cols-3 auto-rows-[250px] gap-2 md:gap-4 direction-rtl";
-      case "manhwa":
-        return "grid-cols-1 auto-rows-[400px] gap-8 max-w-2xl mx-auto";
-      case "franco_belgian":
-        return "grid-cols-2 md:grid-cols-4 auto-rows-[200px] gap-1 md:gap-2";
-      case "american":
-      case "manhua":
-      default:
-        return "grid-cols-1 md:grid-cols-2 lg:grid-cols-3 auto-rows-[300px] gap-4 md:gap-6";
-    }
-  };
 
   const handleExport = async () => {
     if (exporting || panels.length === 0) return;
@@ -78,15 +63,17 @@ export function ComicCanvas() {
         </div>
       )}
 
-      {/* Grid Container */}
-      <div className={`grid ${getGridLayoutClass()} w-full h-fit`}>
+      {/* Comic Pages — 2 per row */}
+      <div className="grid grid-cols-2 gap-6 w-full">
         <AnimatePresence>
-          {panels.map((panel) => (
-            <div
-              key={panel.id}
-              className=""
-            >
-              <ComicPanel panel={panel} />
+          {panels.map((panel, i) => (
+            <div key={panel.id} className="flex flex-col gap-2">
+              <p className="text-xs font-bold text-skeuo-text-muted tracking-widest uppercase">
+                Page {i + 1}
+              </p>
+              <div className="w-full aspect-[4/3]">
+                <ComicPanel panel={panel} />
+              </div>
             </div>
           ))}
         </AnimatePresence>

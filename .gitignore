@@ -53,3 +53,10 @@ gcp-credentials.json
 gemini-live-api-examples/
 
 CLAUDE.md
+error.md
+criteria.md
+task.md
+.agents/
+.agent/
+.claude/
+
