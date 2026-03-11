@@ -4,8 +4,9 @@ import logging
 import os
 from typing import Optional
 
-from google import genai
-from google.genai import types
+# genai package currently lacks proper type stubs; suppress mypy/pyright complaints
+from google import genai  # type: ignore[reportMissingImports,reportUnknownVariableType]
+from google.genai import types  # type: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
