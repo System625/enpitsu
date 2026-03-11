@@ -249,13 +249,15 @@ async def upload_story(
     # don't force a reconnect (which would cause a redundant re-greeting).
     if existing_session_id and existing_session_id in sessions:
         session_id = existing_session_id
-        sessions[session_id].update({
-            "filename": filename,
-            "status": "uploaded",
-            "story_text": text,
-            "scenes": scenes,
-            "current_scene_index": 0,
-        })
+        sessions[session_id].update(
+            {
+                "filename": filename,
+                "status": "uploaded",
+                "story_text": text,
+                "scenes": scenes,
+                "current_scene_index": 0,
+            }
+        )
         logger.info(f"Story injected into existing session: {session_id} | file: {filename} | scenes: {len(scenes)}")
         return {
             "session_id": session_id,
@@ -384,10 +386,7 @@ async def resume_session(
 # LiveKit Token generation
 # ---------------------------------------------------------------------------
 @app.post("/livekit/token")
-async def get_livekit_token(
-    session_id: str,
-    token: str = Header(default="", alias="Authorization")
-):
+async def get_livekit_token(session_id: str, token: str = Header(default="", alias="Authorization")):
     """
     Generate a LiveKit token for the given session.
     """
@@ -406,24 +405,32 @@ async def get_livekit_token(
     session_data = sessions[session_id]
 
     # Store session state in token metadata so the worker can pick it up
-    metadata = json.dumps({
-        "story_text": session_data.get("story_text", ""),
-        "current_style": session_data.get("current_style", "american"),
-        "panels": session_data.get("panels", []),
-        "current_scene_index": session_data.get("current_scene_index", 0),
-    })
+    metadata = json.dumps(
+        {
+            "story_text": session_data.get("story_text", ""),
+            "current_style": session_data.get("current_style", "american"),
+            "panels": session_data.get("panels", []),
+            "current_scene_index": session_data.get("current_scene_index", 0),
+        }
+    )
 
-    lk_token = AccessToken() \
-        .with_identity(f"user_{uid}_{uuid.uuid4().hex[:8]}") \
-        .with_name(uid) \
-        .with_grants(VideoGrants(
-            room_join=True,
-            room=session_id,
-        )) \
+    lk_token = (
+        AccessToken()
+        .with_identity(f"user_{uid}_{uuid.uuid4().hex[:8]}")
+        .with_name(uid)
+        .with_grants(
+            VideoGrants(
+                room_join=True,
+                room=session_id,
+            )
+        )
         .with_metadata(metadata)
+    )
 
     return {"token": lk_token.to_jwt()}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

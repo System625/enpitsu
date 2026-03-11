@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 
 LIVE_MODEL = "gemini-2.0-flash"
 
+
 # ---------------------------------------------------------------------------
 # Helper: publish JSON to frontend via LiveKit Data Channel
 # ---------------------------------------------------------------------------
@@ -44,14 +45,33 @@ class ComicAgent(Agent):
         self._last_imagen_time = 0.0
         self._IMAGEN_MIN_INTERVAL = 4.0
 
-    def _build_page_prompt(self, panel_1, panel_2, panel_3, panel_4, panel_5, panel_6, style="american", safe_mode=False):
+    def _build_page_prompt(
+        self, panel_1, panel_2, panel_3, panel_4, panel_5, panel_6, style="american", safe_mode=False
+    ):
         panels = [panel_1, panel_2, panel_3, panel_4, panel_5, panel_6]
 
         if safe_mode:
             _strip = [
-                "evacuate", "scream", "violent", "blast", "explod", "crash",
-                "destroy", "chaos", "panic", "blood", "weapon", "gun", "fight",
-                "attack", "kill", "dead", "dying", "death", "fire", "smoke",
+                "evacuate",
+                "scream",
+                "violent",
+                "blast",
+                "explod",
+                "crash",
+                "destroy",
+                "chaos",
+                "panic",
+                "blood",
+                "weapon",
+                "gun",
+                "fight",
+                "attack",
+                "kill",
+                "dead",
+                "dying",
+                "death",
+                "fire",
+                "smoke",
             ]
             cleaned = []
             for desc in panels:
@@ -63,9 +83,7 @@ class ComicAgent(Agent):
 
         labels = ["wide establishing", "close-up", "action", "emotion", "action", "cliffhanger"]
         panel_lines = "\n".join(
-            f"Panel {i} ({labels[i-1]}): {desc}"
-            for i, desc in enumerate(panels, 1)
-            if desc.strip()
+            f"Panel {i} ({labels[i - 1]}): {desc}" for i, desc in enumerate(panels, 1) if desc.strip()
         )
 
         rtl_styles = {"manga", "manhwa", "manhua"}
@@ -121,7 +139,9 @@ class ComicAgent(Agent):
 
         logger.info(f"Tool: generate_comic_page | page={page_number} | caption={caption}")
         await _safe_send_data(self.room, {"type": "panel_loading", "panel_number": page_number, "caption": caption})
-        await _safe_send_data(self.room, {"type": "status_update", "status": "generating", "text": f"Drawing page {page_number}..."})
+        await _safe_send_data(
+            self.room, {"type": "status_update", "status": "generating", "text": f"Drawing page {page_number}..."}
+        )
 
         # Rate-limit Imagen calls
         elapsed = time.monotonic() - self._last_imagen_time
@@ -135,26 +155,56 @@ class ComicAgent(Agent):
             if image_b64 is None:
                 logger.warning(f"Page {page_number} safety-filtered, retrying with simplified prompt...")
                 await asyncio.sleep(3)
-                simplified = self._build_page_prompt(panel_1, panel_2, panel_3, panel_4, panel_5, panel_6, style, safe_mode=True)
+                simplified = self._build_page_prompt(
+                    panel_1, panel_2, panel_3, panel_4, panel_5, panel_6, style, safe_mode=True
+                )
                 self._last_imagen_time = time.monotonic()
                 image_b64 = await self.image_gen.generate_panel(simplified, style=style)
 
         except QuotaExceededError:
-            await _safe_send_data(self.room, {"type": "panel_failed", "panel_number": page_number, "message": f"Page {page_number} hit the Imagen quota limit."})
+            await _safe_send_data(
+                self.room,
+                {
+                    "type": "panel_failed",
+                    "panel_number": page_number,
+                    "message": f"Page {page_number} hit the Imagen quota limit.",
+                },
+            )
             await _safe_send_data(self.room, {"type": "status_update", "status": "idle", "text": "Ready."})
             return f"Page {page_number} failed — Imagen quota exceeded (HTTP 429). Tell the user and suggest waiting before retrying."
 
         if image_b64:
-            self.session_data.setdefault("panels", []).append({
-                "panel_number": page_number, "prompt": prompt,
-                "image": image_b64, "caption": caption,
-                "style": style, "scene_index": self.session_data.get("current_scene_index", 0),
-            })
-            await _safe_send_data(self.room, {"type": "panel_generated", "image": image_b64, "prompt": prompt, "text": caption, "panel_number": page_number})
+            self.session_data.setdefault("panels", []).append(
+                {
+                    "panel_number": page_number,
+                    "prompt": prompt,
+                    "image": image_b64,
+                    "caption": caption,
+                    "style": style,
+                    "scene_index": self.session_data.get("current_scene_index", 0),
+                }
+            )
+            await _safe_send_data(
+                self.room,
+                {
+                    "type": "panel_generated",
+                    "image": image_b64,
+                    "prompt": prompt,
+                    "text": caption,
+                    "panel_number": page_number,
+                },
+            )
             await _safe_send_data(self.room, {"type": "status_update", "status": "idle", "text": "Ready."})
             return f"Successfully generated page {page_number}."
         else:
-            await _safe_send_data(self.room, {"type": "panel_failed", "panel_number": page_number, "message": f"Page {page_number} could not be generated."})
+            await _safe_send_data(
+                self.room,
+                {
+                    "type": "panel_failed",
+                    "panel_number": page_number,
+                    "message": f"Page {page_number} could not be generated.",
+                },
+            )
             await _safe_send_data(self.room, {"type": "status_update", "status": "idle", "text": "Ready."})
             return f"Page {page_number} was skipped after two attempts. Continue to the next page."
 
@@ -189,7 +239,9 @@ class ComicAgent(Agent):
         prompt = self._build_page_prompt(panel_1, panel_2, panel_3, panel_4, panel_5, panel_6, style)
 
         logger.info(f"Tool: edit_comic_page | page={page_number}")
-        await _safe_send_data(self.room, {"type": "status_update", "status": "generating", "text": f"Redrawing page {page_number}..."})
+        await _safe_send_data(
+            self.room, {"type": "status_update", "status": "generating", "text": f"Redrawing page {page_number}..."}
+        )
 
         elapsed = time.monotonic() - self._last_imagen_time
         if elapsed < self._IMAGEN_MIN_INTERVAL:
@@ -208,7 +260,16 @@ class ComicAgent(Agent):
                     p["image"] = image_b64
                     p["prompt"] = prompt
                     p["caption"] = caption
-            await _safe_send_data(self.room, {"type": "panel_updated", "panel_number": page_number, "image": image_b64, "text": caption, "prompt": prompt})
+            await _safe_send_data(
+                self.room,
+                {
+                    "type": "panel_updated",
+                    "panel_number": page_number,
+                    "image": image_b64,
+                    "text": caption,
+                    "prompt": prompt,
+                },
+            )
             await _safe_send_data(self.room, {"type": "status_update", "status": "idle", "text": "Ready."})
             return f"Successfully updated page {page_number}."
         else:
