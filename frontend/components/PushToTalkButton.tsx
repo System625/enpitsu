@@ -22,9 +22,6 @@ export function PushToTalkButton() {
   const vadFrameRef = useRef<number | null>(null);
   const [liveText, setLiveText] = useState("");
 
-  const SILENCE_THRESHOLD = 0.01; // RMS below this = silence
-  const SILENCE_DELAY_MS = 1500;  // send turn_complete after 1.5s silence
-
   const isInterruptable = agentState === "speaking" || agentState === "thinking";
 
   // Shared mic setup
@@ -96,41 +93,7 @@ export function PushToTalkButton() {
     setAudioAnalyser(null);
   }, [setAudioAnalyser]);
 
-  // VAD loop for open-mic mode — sends audio_turn_complete after sustained silence
-  // Only fires turn_complete if the user actually spoke since the last turn_complete.
-  const userSpokeRef = useRef(false);
-
-  const startVad = useCallback(() => {
-    const analyser = vadAnalyserRef.current;
-    if (!analyser) return;
-    const buf = new Float32Array(analyser.fftSize);
-    userSpokeRef.current = false;
-
-    const tick = () => {
-      if (!vadAnalyserRef.current) return;
-      analyser.getFloatTimeDomainData(buf);
-      const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
-
-      if (rms > SILENCE_THRESHOLD) {
-        // User is speaking — mark it and cancel any pending silence timer
-        userSpokeRef.current = true;
-        if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
-      } else if (userSpokeRef.current && !silenceTimerRef.current) {
-        // Silence after speech — start timer to end the turn
-        silenceTimerRef.current = setTimeout(() => {
-          silenceTimerRef.current = null;
-          userSpokeRef.current = false;
-          // Signal end of user's turn to Gemini
-          stopRecording(undefined);
-          // Resume listening for the next utterance
-          setTimeout(() => startRecording(), 100);
-        }, SILENCE_DELAY_MS);
-      }
-      // If user never spoke, do nothing (don't spam turn_complete)
-      vadFrameRef.current = requestAnimationFrame(tick);
-    };
-    vadFrameRef.current = requestAnimationFrame(tick);
-  }, [stopRecording, startRecording]);
+  // (no client-side VAD is required; Gemini handles turn detection server-side)
 
   // Update gain when muted state changes (open mic mode)
   useEffect(() => {

@@ -1,17 +1,16 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
-import { createProject, saveProject, loadProject } from "./useProjects";
+import { createProject } from "./useProjects"; // save/load handled elsewhere or not yet implemented
 import { useAuth } from "./useAuth";
 import {
   LiveKitRoom,
   useVoiceAssistant,
   useDataChannel,
   useRoomContext,
-  useLocalParticipant,
   RoomAudioRenderer,
 } from "@livekit/components-react";
-import { Track } from "livekit-client";
+// 'Track' from livekit-client was imported previously but never used
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 const LIVEKIT_URL = process.env.NEXT_PUBLIC_LIVEKIT_URL ?? "wss://enpitsu-livekit.example.livekit.cloud";
@@ -28,6 +27,29 @@ export interface ComicPanel {
 }
 
 export type MicMode = "push-to-talk" | "open-mic";
+
+// Data that we serialize over the LiveKit data channel.  at the moment the
+// client only sends a small subset (user messages, interrupts, style updates),
+// but we allow the union to grow as needed.
+export type OutgoingData =
+  | { type: "user_message"; text: string }
+  | { type: "interrupt" }
+  | { type: "style_update"; style: ComicStyle }
+  | { type: "panel_loading"; panel_number: number; caption?: string }
+  | { type: "panel_generated"; panel_number: number; image: string; text?: string }
+  | { type: "panel_updated"; panel_number: number; image: string; text?: string }
+  | { type: "panels_cleared" }
+  | { type: "panel_failed"; panel_number: number };
+
+interface SyncState {
+  setAgentState: React.Dispatch<React.SetStateAction<AgentState>>;
+  setStoryText: React.Dispatch<React.SetStateAction<string>>;
+  setPendingHighlight: React.Dispatch<React.SetStateAction<LineUpdate | null>>;
+  setCurrentStyle: React.Dispatch<React.SetStateAction<ComicStyle | null>>;
+  setPanels: React.Dispatch<React.SetStateAction<ComicPanel[]>>;
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  setConnectionStatus: React.Dispatch<React.SetStateAction<"connected" | "reconnecting" | "disconnected" | null>>;
+}
 
 export interface LineUpdate {
   old: string;
@@ -68,7 +90,7 @@ interface LiveAgentContextType {
   uploadStory: (file: File) => void;
   startSession: () => void;
   saveCurrentProject: () => void;
-  loadProjectById: (id: string) => Promise<void>;
+  loadProjectById: (id?: string) => Promise<void>;
   exportProjectAsZip: () => Promise<void>;
 }
 
@@ -84,9 +106,8 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const [projectName, setProjectName] = useState("Untitled Story");
   
-  const [currentProjectId, setCurrentProjectId] = useState<string>(() =>
-    createProject("Untitled Story", "american").id
-  );
+  // project ID is constant for now; we don't update it in this hook
+  const currentProjectId = createProject("Untitled Story", "american").id;
 
   const [storyLoaded, setStoryLoaded] = useState(false);
   const [storyText, setStoryText] = useState("");
@@ -97,7 +118,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   const [connectionStatus, setConnectionStatus] = useState<"connected" | "reconnecting" | "disconnected" | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
-  const sendDataRef = useRef<(data: any) => void>(() => {});
+  const sendDataRef = useRef<(data: OutgoingData) => void>(() => {});
 
   // Expose these methods to inner component
   const syncState = {
@@ -202,7 +223,7 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const saveCurrentProject = useCallback(() => {}, []);
-  const loadProjectById = useCallback(async (id: string) => {}, []);
+  const loadProjectById = useCallback(async () => {}, []);
   const exportProjectAsZip = useCallback(async () => {}, []);
 
   return (
@@ -231,10 +252,17 @@ export function LiveAgentProvider({ children }: { children: React.ReactNode }) {
 }
 
 // Internal component to use LiveKit hooks and sync state to context
-function LiveKitManager({ sync, isMuted, micMode, isRecording, sendDataRef }: any) {
+function LiveKitManager({ sync, isMuted, micMode, isRecording, sendDataRef }: {
+  sync: SyncState;
+  isMuted: boolean;
+  micMode: MicMode;
+  isRecording: boolean;
+  sendDataRef: React.MutableRefObject<(data: OutgoingData) => void>;
+}) {
   const room = useRoomContext();
-  const { state: vaState, audioTrack } = useVoiceAssistant();
-  const { localParticipant } = useLocalParticipant();
+  const { state: vaState } = useVoiceAssistant();
+  // not currently used, but kept for future needs:
+  // const { localParticipant } = useLocalParticipant();
 
   // Map LiveKit VA state to our AgentState
   useEffect(() => {
@@ -311,7 +339,7 @@ function LiveKitManager({ sync, isMuted, micMode, isRecording, sendDataRef }: an
   });
 
   useEffect(() => {
-    sendDataRef.current = (data: any) => {
+    sendDataRef.current = (data: OutgoingData) => {
       const payload = new TextEncoder().encode(JSON.stringify(data));
       // sending over dependable channel
       send(payload, { reliable: true });

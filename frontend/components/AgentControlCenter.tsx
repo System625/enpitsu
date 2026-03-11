@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { AgentVisualizer } from "./AgentVisualizer";
 import { StyleSelector } from "./StyleSelector";
 import { FileDropzone } from "./FileDropzone";
 import { ChatPanel } from "./ChatPanel";

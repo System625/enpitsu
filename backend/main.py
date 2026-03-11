@@ -393,20 +393,19 @@ async def get_livekit_token(
     """
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found.")
-    
+
     uid = "anonymous"
     if token:
         clean_token = _extract_bearer(token)
         decoded = await verify_firebase_token(clean_token)
         if decoded:
             uid = decoded["uid"]
-    
+
     from livekit.api import AccessToken, VideoGrants
-    
+
     session_data = sessions[session_id]
-    
+
     # Store session state in token metadata so the worker can pick it up
-    import json
     metadata = json.dumps({
         "story_text": session_data.get("story_text", ""),
         "current_style": session_data.get("current_style", "american"),
@@ -422,7 +421,7 @@ async def get_livekit_token(
             room=session_id,
         )) \
         .with_metadata(metadata)
-        
+
     return {"token": lk_token.to_jwt()}
 
 if __name__ == "__main__":

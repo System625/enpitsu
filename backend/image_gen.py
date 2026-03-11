@@ -1,11 +1,11 @@
 import asyncio
 import base64
 import logging
+import os
 from typing import Optional
 
-import os
-from google.genai import types
 from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class ImageGenerator:
     def __init__(self, model_id: str = "imagen-4.0-generate-001"):
         # On Vertex Express, use "imagen-4.0-generate-001" or "imagen-4.0-fast-generate-001"
         self.model_id = model_id
-        
+
         # Initialize Google GenAI client based on environment variables
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("VERTEX_EXPRESS_API_KEY")
         if api_key:

@@ -1,6 +1,5 @@
 "use client";
 
-import { useMemo } from "react";
 import { useLiveAgent } from "@/app/hooks/useLiveAgent";
 import { useAudioVisualizer } from "@/app/hooks/useAudioVisualizer";
 import { motion } from "framer-motion";
